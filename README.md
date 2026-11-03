@@ -141,10 +141,12 @@ This adds a skill that agents load when they need it, a short section in `AGENTS
 | `drift map` | Summarize a repo: folders, entry points and most imported files |
 | `drift changes [ref]` | List the definitions changed since a git ref, including uncommitted work |
 | `drift bench [path]` | Measure token savings on a repo with a standard set of tasks |
+| `drift audit` | Report where agent tokens went, from your local Claude Code transcripts, and how often Drift was used. Totals only |
 | `drift index [path]` | Build the index yourself. Lookups normally do this on their own |
 | `drift stats` | Show index statistics |
 | `drift batch <parent>` | Index every git repo directly under a directory |
 | `drift install [path]` | Set up a repo so coding agents use Drift. See [For Agents](#for-agents) |
+| `drift update-check` | Check for a newer release now and show how to install it |
 
 ### Options
 
@@ -162,11 +164,14 @@ This adds a skill that agents load when they need it, a short section in `AGENTS
 | `--limit <n>` | Lookups | Show at most this many lines, replacing the default size cap |
 | `--all` | Lookups | Show everything |
 | `--index <file>` | Lookups, `stats` | Use this index file as is, without refreshing it |
-| `--json` | `bench` | Print the report as JSON, to save for `--compare` |
+| `--json` | `bench`, `audit` | Print the report as JSON. `bench` can compare a saved report with `--compare` |
 | `--compare <file>` | `bench` | Compare with a report saved earlier |
 | `--check <percent>` | `bench` | Fail unless savings reach this percent and 90% of answers are right |
+| `--days <n>` | `audit` | How many days back to look (default: 30) |
+| `--project <text>` | `audit` | Only count projects whose transcript folder contains this text |
+| `--dir <folder>` | `audit` | Read transcripts from this folder instead of `~/.claude/projects` |
 
-Lookups stop at a size cap, 4 KB for most and 12 KB for `show`, and say how much they left out. Results come best first: exported source, private source, tests, then fixtures, generated files and migrations.
+Lookups stop at a size cap, 4 KB for most and 12 KB for `show`, and say how much they left out. Results come best first: exported source, private source, tests, then fixtures, generated files, documents and migrations.
 
 ## Supported Languages
 
@@ -177,6 +182,7 @@ Lookups stop at a size cap, 4 KB for most and 12 KB for `show`, and say how much
 | **Python** | `.py` | functions, methods, classes, constants, type aliases, decorators |
 | **Rust** | `.rs` | functions, methods, structs, enums, traits, impls, type aliases, consts, statics, macros, modules |
 | **SQL** | `.sql` | tables, views, functions, procedures, triggers, indexes, types, policies |
+| **Markdown** | `.md`, `.mdx`, `.markdown` | headings, each with the line range of its section |
 
 ### Test Discovery
 
@@ -190,7 +196,7 @@ A JS or TS test file that names no framework takes one from the nearest `package
 
 ## How It Works
 
-Drift walks your repo in parallel and parses each file with [tree-sitter](https://tree-sitter.github.io/). Parsing rather than pattern matching means commented-out code and code inside strings are not mistaken for definitions. SQL is the exception: dialects vary too much for one grammar, so `CREATE` statements are matched by pattern, with comments removed first.
+Drift walks your repo in parallel and parses each file with [tree-sitter](https://tree-sitter.github.io/). Parsing rather than pattern matching means commented-out code and code inside strings are not mistaken for definitions. SQL is the exception: dialects vary too much for one grammar, so `CREATE` statements are matched by pattern, with comments removed first. Markdown is also read without a grammar, and skips code blocks, comments and front matter.
 
 For each file it records:
 
@@ -212,6 +218,12 @@ SQL `CREATE` statements inside dollar-quoted function bodies are counted as defi
 ### Ignored by default
 
 Drift respects `.gitignore` and `.ignore` files and skips hidden directories, `node_modules`, `dist`, `build`, `target`, `vendor`, `coverage`, `venv` and similar directories. It also skips lockfiles, `*.min.js` and files over 512 KB.
+
+### Update notices
+
+Once a day at most, a lookup starts a short background check for a newer release, so it never waits on the network. The check is an ordinary `git ls-remote` of this repo, and nothing about you or your code is sent. If there's a newer release, Drift prints one line to stderr, at most once a day, with the command to update. It never updates itself.
+
+Set `DRIFT_NO_UPDATE_CHECK=1` to turn this off. It's also off when `CI` is set.
 
 ## Index Schema
 

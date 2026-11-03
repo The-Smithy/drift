@@ -125,7 +125,10 @@ fn is_entry_point(path: &str) -> bool {
     let file = path.rsplit('/').next().unwrap_or(path);
     let stem = file.split('.').next().unwrap_or(file);
     let depth = path.matches('/').count();
+    let is_document =
+        file.ends_with(".md") || file.ends_with(".mdx") || file.ends_with(".markdown");
     depth <= 2
+        && !is_document
         && matches!(
             stem,
             "main" | "cli" | "server" | "app" | "__main__" | "manage" | "index" | "lib"

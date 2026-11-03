@@ -13,6 +13,7 @@ paths:
   - "**/*.py"
   - "**/*.rs"
   - "**/*.sql"
+  - "**/*.md"
 ---
 
 # Drift: find code, read less
@@ -25,7 +26,7 @@ Run these before grepping or reading whole files. The index builds and refreshes
 | Search by words | `drift find rate limit` |
 | Read one definition | `drift show <symbol>` (or `path:name`, `Parent.name`) |
 | See how to call it | `drift sig <symbol>` |
-| See what a file contains | `drift outline <file>` |
+| See what a file or long doc contains | `drift outline <file>` |
 | Find uses | `drift refs <symbol>` |
 | Find importers | `drift importers <file>` |
 | Find tests | `drift tests <text>` or `drift tests --for <file>` |

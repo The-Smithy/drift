@@ -10,7 +10,7 @@ Every feature has to answer yes to all of these:
 
 1. **Does it save tokens?** It reduces what an agent reads to do a real task, compared with what the agent does today.
 2. **Can you show the numbers?** See [Measuring a change](#measuring-a-change).
-3. **Does it stay a utility?** It's a local, one-shot command with no server, account, background process or network access.
+3. **Does it stay a utility?** It's a local, one-shot command with no server, account, background process or network access. The once-a-day update check is the one exception.
 4. **Does it earn its size?** Any new dependency, flag or line of default output has to pay for itself.
 
 These changes need no token numbers: bug fixes, accuracy fixes, and build or documentation work.
@@ -134,7 +134,7 @@ Using an AI agent to write your change is fine and fairly fitting. You're still 
 
 ## Dependencies
 
-Drift ships as a single binary with no runtime dependencies, and that won't change. A new crate needs a clear reason. Features that need a network connection, a service or a background process don't fit the project.
+Drift ships as a single binary with no runtime dependencies, and that won't change. A new crate needs a clear reason. Features that need a network connection, a service or a background process don't fit the project. The update check is the one exception: it's a short `git ls-remote` that sends nothing about the user or their code, never delays a lookup, can be turned off, and adds no dependency.
 
 ## Releasing
 
@@ -144,6 +144,8 @@ For maintainers:
 2. Push a matching tag, such as `v0.3.0`. A tag containing `-`, such as `v0.3.0-rc.1`, is published as a prerelease.
 
 The Release workflow then builds every target, checks each packaged binary, and publishes the archives with checksums. It fails if the tag doesn't match the version in `Cargo.toml`.
+
+Every install checks these tags, so people are told about a tag within a day of it being pushed. Prerelease tags are ignored. If a release build fails, delete the tag or publish a fix quickly, because the notice will already be pointing at it.
 
 ## License
 

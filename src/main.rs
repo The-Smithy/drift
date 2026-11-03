@@ -1,5 +1,6 @@
 #[cfg(target_env = "musl")]
 mod allocator;
+mod audit;
 mod bench;
 mod extract;
 mod imports;
@@ -8,6 +9,7 @@ mod install;
 mod lookup;
 mod model;
 mod overview;
+mod update;
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
@@ -185,6 +187,21 @@ enum Command {
         #[arg(long, value_name = "PERCENT")]
         check: Option<f64>,
     },
+    /// Report where agent tokens went, from local Claude Code transcripts
+    Audit {
+        /// How many days back to look
+        #[arg(long, default_value_t = 30)]
+        days: u64,
+        /// Only count projects whose transcript folder contains this text
+        #[arg(long, value_name = "TEXT")]
+        project: Option<String>,
+        /// Read transcripts from this folder instead of ~/.claude/projects
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+        /// Print the totals as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Show index statistics
     Stats {
         #[command(flatten)]
@@ -219,9 +236,14 @@ enum Command {
         #[arg(long, value_name = "TOOL", value_delimiter = ',')]
         agent: Vec<String>,
     },
+    /// Check for a newer release and show how to install it
+    UpdateCheck,
     /// Used by the Claude Code hook; reads an event on stdin
     #[command(hide = true)]
     Hook,
+    /// Used by the background update check
+    #[command(hide = true, name = "__update-refresh")]
+    UpdateRefresh,
 }
 
 // `drift refs x | head` closes the pipe early. That's normal, not a crash worth reporting.
@@ -237,7 +259,21 @@ fn exit_quietly_on_closed_pipe() {
 
 fn main() -> Result<()> {
     exit_quietly_on_closed_pipe();
-    match Cli::parse().command {
+    let command = Cli::parse().command;
+    // The hook runs on every search and speaks JSON, and the other two already deal with updates.
+    let quiet = matches!(
+        command,
+        Command::Hook | Command::UpdateCheck | Command::UpdateRefresh
+    );
+    let result = run(command);
+    if !quiet {
+        update::after_command();
+    }
+    result
+}
+
+fn run(command: Command) -> Result<()> {
+    match command {
         Command::Index {
             path,
             output,
@@ -349,6 +385,12 @@ fn main() -> Result<()> {
             compare,
             check,
         } => bench::run(&path, tasks, json, compare.as_deref(), check),
+        Command::Audit {
+            days,
+            project,
+            dir,
+            json,
+        } => audit::run(days, project.as_deref(), dir.as_deref(), json),
         Command::Stats { args } => cmd_stats(&args.load()?),
         Command::Batch {
             parent,
@@ -362,8 +404,13 @@ fn main() -> Result<()> {
             file,
             agent,
         } => cmd_install(&path, hook, instructions, file.as_deref(), &agent),
+        Command::UpdateCheck => update::check_now(),
         Command::Hook => {
             install::hook();
+            Ok(())
+        }
+        Command::UpdateRefresh => {
+            update::refresh();
             Ok(())
         }
     }
