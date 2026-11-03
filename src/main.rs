@@ -1,9 +1,13 @@
 #[cfg(target_env = "musl")]
 mod allocator;
+mod bench;
 mod extract;
+mod imports;
 mod index;
+mod install;
 mod lookup;
 mod model;
+mod overview;
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
@@ -11,23 +15,52 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use anyhow::{Result, ensure};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
-use index::{INDEX_FILE, index_repo, read_index, resolve_root, write_index};
+use index::{INDEX_FILE, index_repo, load_index, resolve_root, write_index};
+use lookup::{BUNDLE_CAP, LOOKUP_CAP, SOURCE_CAP, View, deliver};
 use model::Index;
-
-const SKILL: &str = include_str!("skill.md");
 
 #[derive(Parser)]
 #[command(
     name = "drift",
     version,
-    about = "Index a codebase for fast agent-searchable lookups.",
+    about = "Find code with fewer tokens: an index and lookups for AI agents.",
     arg_required_else_help = true
 )]
 struct Cli {
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Args)]
+struct LookupArgs {
+    /// Use this index file as is, without refreshing it
+    #[arg(long)]
+    index: Option<PathBuf>,
+    /// Show at most this many lines instead of the default size cap
+    #[arg(long)]
+    limit: Option<usize>,
+    /// Show everything, ignoring the default size cap
+    #[arg(long)]
+    all: bool,
+    /// Only look in this folder
+    #[arg(long = "in", value_name = "PATH")]
+    within: Option<String>,
+}
+
+impl LookupArgs {
+    fn view(&self) -> View {
+        View {
+            limit: self.limit,
+            all: self.all,
+            within: self.within.clone(),
+        }
+    }
+
+    fn load(&self) -> Result<Index> {
+        load_index(self.index.as_deref())
+    }
 }
 
 #[derive(Subcommand)]
@@ -50,43 +83,112 @@ enum Command {
         #[arg(long)]
         compact: bool,
     },
-    /// Look up where a symbol is defined
+    /// Look up where symbols are defined
     Query {
-        /// Symbol name; falls back to a case-insensitive substring match
-        symbol: String,
-        /// Path to index file
-        #[arg(long, default_value = INDEX_FILE)]
-        index: PathBuf,
+        /// Symbol names; each falls back to a case-insensitive substring match
+        #[arg(required = true)]
+        symbols: Vec<String>,
+        #[command(flatten)]
+        args: LookupArgs,
     },
-    /// List a file's symbols and imports without reading it
+    /// Search for definitions by words in any order, such as: rate limit
+    Find {
+        /// Words to look for in names, doc comments and paths
+        #[arg(required = true)]
+        words: Vec<String>,
+        #[command(flatten)]
+        args: LookupArgs,
+    },
+    /// Print a definition's source
+    Show {
+        /// A name, Parent.name or path:name
+        symbol: String,
+        #[command(flatten)]
+        args: LookupArgs,
+    },
+    /// Print only a definition's signature and doc comment
+    Sig {
+        /// Names, as Parent.name or path:name if needed
+        #[arg(required = true)]
+        symbols: Vec<String>,
+        #[command(flatten)]
+        args: LookupArgs,
+    },
+    /// List a file's definitions and imports without reading it
     Outline {
         /// File path, or a trailing part of one such as lib/auth.ts
         file: String,
-        /// Path to index file
-        #[arg(long, default_value = INDEX_FILE)]
-        index: PathBuf,
+        /// Show each definition's signature instead of its name
+        #[arg(long)]
+        sig: bool,
+        #[command(flatten)]
+        args: LookupArgs,
+    },
+    /// Find uses of a symbol, by file and enclosing definition
+    Refs {
+        /// Symbol name
+        symbol: String,
+        #[command(flatten)]
+        args: LookupArgs,
     },
     /// List test files, or find tests by path, suite or case name
     Tests {
         /// Case-insensitive text to look for; omit to summarize every test file
         pattern: Option<String>,
-        /// Path to index file
-        #[arg(long, default_value = INDEX_FILE)]
-        index: PathBuf,
+        /// Find the tests for this source file instead
+        #[arg(long = "for", value_name = "FILE", conflicts_with = "pattern")]
+        for_file: Option<String>,
+        #[command(flatten)]
+        args: LookupArgs,
     },
     /// Find the files that import a module
     Importers {
         /// File path such as src/lib/auth.ts, or text to find in import sources
         module: String,
-        /// Path to index file
-        #[arg(long, default_value = INDEX_FILE)]
-        index: PathBuf,
+        #[command(flatten)]
+        args: LookupArgs,
+    },
+    /// Everything needed before changing a symbol or file
+    Context {
+        /// A symbol or a file
+        target: String,
+        #[command(flatten)]
+        args: LookupArgs,
+    },
+    /// Summarize a repo: folders, entry points and most imported files
+    Map {
+        #[command(flatten)]
+        args: LookupArgs,
+    },
+    /// List the definitions changed since a git ref (default: HEAD)
+    Changes {
+        /// Git ref to compare with
+        reference: Option<String>,
+        #[command(flatten)]
+        args: LookupArgs,
+    },
+    /// Measure token savings on a repo with a standard set of tasks
+    Bench {
+        /// Path to repo root
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Tasks to run of each kind
+        #[arg(long, default_value_t = 10)]
+        tasks: usize,
+        /// Print the report as JSON, to save for --compare
+        #[arg(long)]
+        json: bool,
+        /// Compare with a report saved earlier using --json
+        #[arg(long, value_name = "FILE")]
+        compare: Option<PathBuf>,
+        /// Fail unless total savings reach this percent and 90% of answers are right
+        #[arg(long, value_name = "PERCENT")]
+        check: Option<f64>,
     },
     /// Show index statistics
     Stats {
-        /// Path to index file
-        #[arg(long, default_value = INDEX_FILE)]
-        index: PathBuf,
+        #[command(flatten)]
+        args: LookupArgs,
     },
     /// Index every git repo directly under a parent directory
     Batch {
@@ -95,19 +197,46 @@ enum Command {
         /// Compact output
         #[arg(long)]
         compact: bool,
-        /// Also install the Claude Code skill in each repo
+        /// Also install the skills in each repo
         #[arg(long)]
         install: bool,
     },
-    /// Install the Claude Code skill into a repo
+    /// Set up a repo so coding agents use Drift
     Install {
         /// Path to repo root
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Also add a Claude Code hook that points agents to Drift
+        #[arg(long)]
+        hook: bool,
+        /// Also add instructions to AGENTS.md, and to CLAUDE.md and GEMINI.md if the repo has them
+        #[arg(long)]
+        instructions: bool,
+        /// Put the instructions in this file instead
+        #[arg(long, value_name = "FILE", requires = "instructions")]
+        file: Option<PathBuf>,
+        /// Also set up these tools before the repo uses them: kiro, junie, continue, aider or all
+        #[arg(long, value_name = "TOOL", value_delimiter = ',')]
+        agent: Vec<String>,
     },
+    /// Used by the Claude Code hook; reads an event on stdin
+    #[command(hide = true)]
+    Hook,
+}
+
+// `drift refs x | head` closes the pipe early. That's normal, not a crash worth reporting.
+fn exit_quietly_on_closed_pipe() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if info.to_string().contains("failed printing to stdout") {
+            std::process::exit(0);
+        }
+        default_hook(info);
+    }));
 }
 
 fn main() -> Result<()> {
+    exit_quietly_on_closed_pipe();
     match Cli::parse().command {
         Command::Index {
             path,
@@ -116,25 +245,157 @@ fn main() -> Result<()> {
             ignore_files,
             compact,
         } => cmd_index(&path, output, &ignore_dirs, &ignore_files, compact),
-        Command::Query { symbol, index } => lookup::query(&symbol, &index),
-        Command::Outline { file, index } => lookup::outline(&file, &index),
-        Command::Tests { pattern, index } => lookup::tests(pattern.as_deref(), &index),
-        Command::Importers { module, index } => lookup::importers(&module, &index),
-        Command::Stats { index } => cmd_stats(&index),
+        Command::Query { symbols, args } => {
+            let view = args.view();
+            deliver(
+                lookup::query(&args.load()?, &symbols, &view),
+                &view,
+                LOOKUP_CAP,
+            );
+            Ok(())
+        }
+        Command::Find { words, args } => {
+            let view = args.view();
+            deliver(
+                lookup::find(&args.load()?, &words, &view),
+                &view,
+                LOOKUP_CAP,
+            );
+            Ok(())
+        }
+        Command::Show { symbol, args } => {
+            let view = args.view();
+            deliver(
+                lookup::show(&args.load()?, &symbol, &view),
+                &view,
+                SOURCE_CAP,
+            );
+            Ok(())
+        }
+        Command::Sig { symbols, args } => {
+            let view = args.view();
+            deliver(
+                lookup::sig(&args.load()?, &symbols, &view),
+                &view,
+                LOOKUP_CAP,
+            );
+            Ok(())
+        }
+        Command::Outline { file, sig, args } => {
+            let view = args.view();
+            deliver(
+                lookup::outline(&args.load()?, &file, sig),
+                &view,
+                LOOKUP_CAP,
+            );
+            Ok(())
+        }
+        Command::Refs { symbol, args } => {
+            let view = args.view();
+            deliver(
+                lookup::refs(&args.load()?, &symbol, &view),
+                &view,
+                LOOKUP_CAP,
+            );
+            Ok(())
+        }
+        Command::Tests {
+            pattern,
+            for_file,
+            args,
+        } => {
+            let view = args.view();
+            let index = args.load()?;
+            let answer = match for_file {
+                Some(file) => lookup::tests_for(&index, &file),
+                None => lookup::tests(&index, pattern.as_deref(), &view),
+            };
+            deliver(answer, &view, LOOKUP_CAP);
+            Ok(())
+        }
+        Command::Importers { module, args } => {
+            let view = args.view();
+            deliver(
+                lookup::importers(&args.load()?, &module, &view),
+                &view,
+                LOOKUP_CAP,
+            );
+            Ok(())
+        }
+        Command::Context { target, args } => {
+            let view = args.view();
+            deliver(
+                lookup::context(&args.load()?, &target, &view),
+                &view,
+                BUNDLE_CAP,
+            );
+            Ok(())
+        }
+        Command::Map { args } => {
+            let view = args.view();
+            deliver(overview::map(&args.load()?, &view), &view, BUNDLE_CAP);
+            Ok(())
+        }
+        Command::Changes { reference, args } => {
+            let view = args.view();
+            let answer = overview::changes(&args.load()?, reference.as_deref(), &view)?;
+            deliver(answer, &view, LOOKUP_CAP);
+            Ok(())
+        }
+        Command::Bench {
+            path,
+            tasks,
+            json,
+            compare,
+            check,
+        } => bench::run(&path, tasks, json, compare.as_deref(), check),
+        Command::Stats { args } => cmd_stats(&args.load()?),
         Command::Batch {
             parent,
             compact,
             install,
         } => cmd_batch(&parent, compact, install),
-        Command::Install { path } => {
-            let skill = install_skill(&resolve_root(&path)?)?;
-            println!("Installed skill at {}", skill.display());
-            println!(
-                "Run 'drift index' to generate the index, then agents will use it automatically."
-            );
+        Command::Install {
+            path,
+            hook,
+            instructions,
+            file,
+            agent,
+        } => cmd_install(&path, hook, instructions, file.as_deref(), &agent),
+        Command::Hook => {
+            install::hook();
             Ok(())
         }
     }
+}
+
+fn cmd_install(
+    path: &Path,
+    hook: bool,
+    instructions: bool,
+    file: Option<&Path>,
+    agents: &[String],
+) -> Result<()> {
+    let root = resolve_root(path)?;
+    for skill in install::install_skills(&root)? {
+        println!("Skill: {}", skill.display());
+    }
+    if install::ignore_index(&root)? {
+        println!("Added {INDEX_FILE} to .gitignore");
+    }
+    for line in install::install_tools(&root, agents)? {
+        println!("{line}");
+    }
+    if instructions {
+        for target in install::instructions_targets(&root, file) {
+            install::install_instructions(&target)?;
+            println!("Instructions: {}", target.display());
+        }
+    }
+    if hook {
+        println!("Hook: {}", install::install_hook(&root)?.display());
+    }
+    Ok(())
 }
 
 fn cmd_index(
@@ -164,9 +425,7 @@ fn cmd_index(
     Ok(())
 }
 
-fn cmd_stats(index_path: &Path) -> Result<()> {
-    let index = read_index(index_path)?;
-
+fn cmd_stats(index: &Index) -> Result<()> {
     let total_lines: u64 = index.files.values().map(|f| u64::from(f.lines)).sum();
     let unique: HashSet<&str> = index
         .files
@@ -266,17 +525,9 @@ fn index_one(repo: &Path, compact: bool, install: bool) -> Result<(Index, PathBu
     write_index(&index, &output, compact)?;
     let elapsed = start.elapsed().as_secs_f64();
     if install && !index.files.is_empty() {
-        install_skill(repo)?;
+        install::install_skills(repo)?;
     }
     Ok((index, output, elapsed))
-}
-
-fn install_skill(root: &Path) -> Result<PathBuf> {
-    let directory = root.join(".claude").join("skills").join("drift");
-    fs::create_dir_all(&directory)?;
-    let skill = directory.join("SKILL.md");
-    fs::write(&skill, SKILL)?;
-    Ok(skill)
 }
 
 fn size_kb(path: &Path) -> f64 {

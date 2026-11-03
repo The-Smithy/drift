@@ -94,8 +94,15 @@ impl<'a> Visitor<'a> {
                 if let Some(left) = node.child_by_field_name("left") {
                     let name = text(left, self.source);
                     let exported = !name.starts_with('_');
-                    self.symbols
-                        .push(symbol(name, "type", node, exported, false, None));
+                    self.symbols.push(symbol(
+                        self.source,
+                        name,
+                        "type",
+                        node,
+                        exported,
+                        false,
+                        None,
+                    ));
                 }
             }
             "block"
@@ -124,7 +131,15 @@ impl<'a> Visitor<'a> {
         let kind = if is_class { "class" } else { "function" };
         let is_async = !is_class && has_child_kind(node, "async");
 
-        let mut entry = symbol(name, kind, node, exported, is_async, scope.name());
+        let mut entry = symbol(
+            self.source,
+            name,
+            kind,
+            node,
+            exported,
+            is_async,
+            scope.name(),
+        );
         entry.decorators = Some(decorators);
         self.symbols.push(entry);
 
@@ -172,7 +187,7 @@ impl<'a> Visitor<'a> {
 
         if is_constant_name(name) {
             self.symbols
-                .push(symbol(name, "const", node, true, false, None));
+                .push(symbol(self.source, name, "const", node, true, false, None));
         }
     }
 }

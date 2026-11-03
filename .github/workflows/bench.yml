@@ -1,0 +1,56 @@
+name: Bench
+
+on:
+  pull_request:
+    branches: [master]
+    paths:
+      - src/**
+      - bench/**
+      - Cargo.lock
+      - Cargo.toml
+      - .github/workflows/bench.yml
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    name: Token savings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+      - run: cargo build --release --locked
+      - name: Measure the base branch
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git worktree add ../base "$BASE"
+          (cd ../base && cargo build --release --locked)
+          # A base from before `drift bench` existed has nothing to compare with.
+          if ../base/target/release/drift bench --help > /dev/null 2>&1; then
+            DRIFT="$PWD/../base/target/release/drift" bench/run.sh --save "$RUNNER_TEMP/before"
+            echo "COMPARE=--compare $RUNNER_TEMP/before" >> "$GITHUB_ENV"
+          fi
+      - name: Measure this branch
+        run: |
+          {
+            echo '```'
+            # shellcheck disable=SC2086
+            bench/run.sh ${COMPARE:-} --check 50
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          exit "${PIPESTATUS[0]}"

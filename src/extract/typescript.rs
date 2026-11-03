@@ -92,8 +92,15 @@ impl<'a> Visitor<'a> {
             "function_declaration" | "generator_function_declaration" | "function_signature" => {
                 if let Some(name) = self.field_text(node, "name") {
                     let is_async = has_child_kind(node, "async");
-                    self.symbols
-                        .push(symbol(name, "function", node, exported, is_async, parent));
+                    self.symbols.push(symbol(
+                        self.source,
+                        name,
+                        "function",
+                        node,
+                        exported,
+                        is_async,
+                        parent,
+                    ));
                 }
             }
             "class_declaration" | "abstract_class_declaration" => {
@@ -107,8 +114,15 @@ impl<'a> Visitor<'a> {
                     return;
                 };
                 let name = name.trim_matches(|c| c == '"' || c == '\'');
-                self.symbols
-                    .push(symbol(name, "module", node, exported, false, parent));
+                self.symbols.push(symbol(
+                    self.source,
+                    name,
+                    "module",
+                    node,
+                    exported,
+                    false,
+                    parent,
+                ));
                 if let Some(body) = node.child_by_field_name("body") {
                     self.visit_statements(body, Some(name));
                 }
@@ -162,8 +176,15 @@ impl<'a> Visitor<'a> {
 
     fn push_named(&mut self, node: Node, kind: &str, exported: bool, parent: Option<&str>) {
         if let Some(name) = self.field_text(node, "name") {
-            self.symbols
-                .push(symbol(name, kind, node, exported, false, parent));
+            self.symbols.push(symbol(
+                self.source,
+                name,
+                kind,
+                node,
+                exported,
+                false,
+                parent,
+            ));
         }
     }
 
@@ -268,8 +289,15 @@ impl<'a> Visitor<'a> {
         let Some(name) = self.field_text(node, "name") else {
             return;
         };
-        self.symbols
-            .push(symbol(name, "class", node, exported, false, parent));
+        self.symbols.push(symbol(
+            self.source,
+            name,
+            "class",
+            node,
+            exported,
+            false,
+            parent,
+        ));
 
         let Some(body) = node.child_by_field_name("body") else {
             return;
@@ -306,6 +334,7 @@ impl<'a> Visitor<'a> {
                     .push((self.symbols.len(), name.to_string()));
             }
             self.symbols.push(symbol(
+                self.source,
                 member_name,
                 "function",
                 member,
@@ -338,8 +367,15 @@ impl<'a> Visitor<'a> {
             let mut names = Vec::new();
             collect_pattern_names(name_node, self.source, &mut names);
             for name in names {
-                self.symbols
-                    .push(symbol(name, "const", declaration, exported, false, parent));
+                self.symbols.push(symbol(
+                    self.source,
+                    name,
+                    "const",
+                    declaration,
+                    exported,
+                    false,
+                    parent,
+                ));
             }
             return;
         }
@@ -349,8 +385,15 @@ impl<'a> Visitor<'a> {
             Some(v) if is_function_value(v) => ("function", has_child_kind(v, "async")),
             _ => ("const", false),
         };
-        self.symbols
-            .push(symbol(name, kind, declaration, exported, is_async, parent));
+        self.symbols.push(symbol(
+            self.source,
+            name,
+            kind,
+            declaration,
+            exported,
+            is_async,
+            parent,
+        ));
     }
 
     fn visit_commonjs_export(&mut self, assignment: Node) {
@@ -393,6 +436,7 @@ impl<'a> Visitor<'a> {
         };
         if is_function_value(right) {
             self.symbols.push(symbol(
+                self.source,
                 name,
                 "function",
                 assignment,
@@ -404,8 +448,15 @@ impl<'a> Visitor<'a> {
             self.exported_names
                 .insert(text(right, self.source).to_string());
         } else {
-            self.symbols
-                .push(symbol(name, "const", assignment, true, false, None));
+            self.symbols.push(symbol(
+                self.source,
+                name,
+                "const",
+                assignment,
+                true,
+                false,
+                None,
+            ));
         }
     }
 

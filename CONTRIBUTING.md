@@ -17,26 +17,37 @@ These changes need no token numbers: bug fixes, accuracy fixes, and build or doc
 
 ## Measuring a change
 
-Until the benchmark suite from Phase 0 exists, compare output sizes by hand on at least one real repo, and put the results in your PR:
+Everyone measures the same way, using the standard benchmark. Save the numbers before your change, then compare after it:
 
 ```bash
-drift query requireAuth | wc -c
-git grep -n requireAuth | wc -c
-wc -c src/lib/auth.ts
+cargo build --release
+bench/run.sh --save /tmp/before
+
+# make your change
+
+cargo build --release
+bench/run.sh --compare /tmp/before
 ```
 
-| Task | Without this change | With it |
-|------|--------------------|---------|
-| Find a function's definition | 10,861 bytes (`git grep`) | 77 bytes |
+`bench/run.sh` runs `drift bench` on the public repos pinned in `bench/corpus.txt`, so your numbers mean the same as anyone else's. CI runs the same comparison on every PR that touches the code, and fails if a repo saves less than 50% or fewer than 90% of answers are right. Paste the results in your PR.
 
-Compare against what an agent would really do, which is usually `grep` or reading the file. Count bytes, and use 4 bytes per token if you convert. Include your worst case as well as your best, such as a very common name in a large repo.
+To try it on your own repo, use `drift bench <path>`, with `--json` to save a report and `--compare` to compare with one.
+
+**How to read the results:**
+
+- **without** is what an agent would otherwise read: a search capped at 250 lines, or the file capped at 2,000 lines, matching Claude Code's defaults.
+- **drift** is the output of the matching Drift command, with its default limits.
+- **right** counts answers containing the result the index expects. It catches a limit or ranking change that hides the answer, but because it relies on the index, it can't catch a wrong index. For that, see [Accuracy comes first](#accuracy-comes-first).
+
+If you add a lookup, add a task for it in `src/bench.rs`. Baselines have to be what an agent would really do. Making them larger to improve the score defeats the point.
 
 ## Rules for output
 
 Output is the product, because every byte printed goes into an agent's context.
 
 - **Default to the smallest useful answer.** Extra detail goes behind a flag.
-- **Never print unbounded output.** If a result can grow with repo size, it needs a limit and a line saying what was left out.
+- **Never print unbounded output.** Build your output as lines and pass it through `deliver` in `src/lookup.rs`, which applies the size cap and says what was left out.
+- **Put the best results first.** A cap is only safe if the likely answer comes before it. Use `path_tier` for ranking.
 - **Skip decoration.** No banners, colors, progress bars or repeated explanations. Don't repeat a file path on every line when one grouping will do.
 - **Make the next step obvious.** Print `file:start-end`, so an agent can read just those lines.
 - **Make misses cheap.** Say clearly when nothing matched and exit with code 1, so an agent doesn't retry blindly.
@@ -52,7 +63,7 @@ A wrong answer costs more than a long one. If Drift wrongly says nothing imports
 
 ## Instructions cost tokens too
 
-`src/skill.md` and the instructions in users' repos are loaded by agents, some of them in every session. Keep them short, and remove a line when a feature makes it unnecessary. Any addition to the skill has to justify its cost.
+`src/skill.md` and `src/instructions.md` are loaded by agents, some of them in every session. Keep them short, and remove a line when a feature makes it unnecessary. A test enforces a size limit on both, so raising that limit needs a good reason.
 
 ## Getting set up
 
@@ -67,12 +78,17 @@ cargo test
 | Path | What's there |
 |------|--------------|
 | `src/main.rs` | Commands and flags |
-| `src/index.rs` | Walking a repo, and reading and writing the index |
-| `src/lookup.rs` | `query`, `outline`, `tests` and `importers` |
+| `src/index.rs` | Walking a repo, and building, refreshing and saving the index |
+| `src/lookup.rs` | Lookups: `query`, `find`, `show`, `sig`, `outline`, `refs`, `tests`, `importers`, `context` |
+| `src/overview.rs` | `map`, `changes` and the import graph |
+| `src/imports.rs` | Resolving an import to a file |
+| `src/bench.rs` | The standard benchmark |
+| `src/install.rs` | `install` and the Claude Code hook |
 | `src/model.rs` | The index format |
 | `src/allocator.rs` | mimalloc, for the musl build only |
 | `src/extract/` | One extractor per language |
-| `src/skill.md` | The skill written by `drift install` |
+| `src/skill.md`, `src/instructions.md` | What `drift install` writes |
+| `bench/` | The pinned repos and the script that runs them |
 | `tests/cli.rs` | Tests that run the real binary |
 
 ## Adding a language
@@ -85,6 +101,10 @@ cargo test
 6. Update the language tables in `README.md` and `AGENTS.md`.
 
 Note the change in binary size in your PR. Each grammar adds to it.
+
+## Supporting another agent tool
+
+Prefer the shared locations, `AGENTS.md` and `.agents/skills/`, because a new file per tool clutters every repo. If a tool can't read those, add it to `TOOLS_NEEDING_SETUP` in `src/install.rs`, link its documentation in your PR, and update the table in `README.md`.
 
 ## Changing the index format
 

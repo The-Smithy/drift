@@ -94,6 +94,7 @@ impl<'a> Visitor<'a> {
                         c.kind() == "function_modifiers" && text(*c, self.source).contains("async")
                     });
                     self.symbols.push(symbol(
+                        self.source,
                         name,
                         "function",
                         node,
@@ -161,8 +162,15 @@ impl<'a> Visitor<'a> {
             return;
         }
         if let Some(name) = self.name_of(node) {
-            self.symbols
-                .push(symbol(name, kind, node, exported, false, scope.parent));
+            self.symbols.push(symbol(
+                self.source,
+                name,
+                kind,
+                node,
+                exported,
+                false,
+                scope.parent,
+            ));
         }
     }
 
@@ -182,8 +190,15 @@ impl<'a> Visitor<'a> {
             None => type_name.to_string(),
         };
         if !scope.in_test_module {
-            self.symbols
-                .push(symbol(&label, "impl", node, false, false, None));
+            self.symbols.push(symbol(
+                self.source,
+                &label,
+                "impl",
+                node,
+                false,
+                false,
+                None,
+            ));
         }
         if let Some(body) = node.child_by_field_name("body") {
             self.visit_items(
@@ -203,8 +218,15 @@ impl<'a> Visitor<'a> {
         };
         let is_test_module = attributes.iter().any(|a| is_cfg_test(a));
         if !scope.in_test_module && !is_test_module {
-            self.symbols
-                .push(symbol(name, "module", node, exported, false, scope.parent));
+            self.symbols.push(symbol(
+                self.source,
+                name,
+                "module",
+                node,
+                exported,
+                false,
+                scope.parent,
+            ));
         }
         if let Some(body) = node.child_by_field_name("body") {
             self.visit_items(

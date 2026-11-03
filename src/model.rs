@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: &str = "1.1";
+pub const SCHEMA_VERSION: &str = "1.2";
 
 fn default_true() -> bool {
     true
@@ -27,6 +27,10 @@ pub struct Symbol {
     pub parent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decorators: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -97,6 +101,11 @@ pub struct Index {
     pub root: String,
     pub generated_at: String,
     pub languages: Vec<String>,
+    // Repeated when a lookup refreshes the index, so a refresh matches the original run.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore_dirs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore_files: Vec<String>,
     pub files: BTreeMap<String, FileEntry>,
     pub tests: BTreeMap<String, TestFile>,
     pub symbol_index: BTreeMap<String, Vec<SymbolLocation>>,
@@ -122,6 +131,8 @@ impl Index {
             root: &self.root,
             generated_at: &self.generated_at,
             languages: &self.languages,
+            ignore_dirs: &self.ignore_dirs,
+            ignore_files: &self.ignore_files,
             files: self
                 .files
                 .iter()
@@ -156,6 +167,10 @@ pub struct CompactIndex<'a> {
     root: &'a str,
     generated_at: &'a str,
     languages: &'a [String],
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    ignore_dirs: &'a [String],
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    ignore_files: &'a [String],
     files: BTreeMap<&'a str, CompactFile<'a>>,
     tests: &'a BTreeMap<String, TestFile>,
     symbol_index: BTreeMap<&'a str, Vec<CompactLocation<'a>>>,
@@ -187,6 +202,8 @@ impl<'a> From<&'a FileEntry> for CompactFile<'a> {
                     is_async: s.is_async,
                     parent: s.parent.as_deref(),
                     decorators: s.decorators.as_deref().filter(|d| !d.is_empty()),
+                    signature: s.signature.as_deref(),
+                    doc: s.doc.as_deref(),
                 })
                 .collect(),
             imports: file
@@ -216,6 +233,10 @@ struct CompactSymbol<'a> {
     parent: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     decorators: Option<&'a [String]>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signature: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    doc: Option<&'a str>,
 }
 
 #[derive(Serialize)]

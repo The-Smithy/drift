@@ -114,6 +114,8 @@ pub fn index_repo(root: &Path, extra_dirs: &[String], extra_files: &[String]) ->
     }
 
     Ok(Index {
+        ignore_dirs: extra_dirs.to_vec(),
+        ignore_files: extra_files.to_vec(),
         version: SCHEMA_VERSION.to_string(),
         repo: root
             .file_name()
@@ -132,7 +134,14 @@ pub fn write_index(index: &Index, output: &Path, compact: bool) -> Result<()> {
     if let Some(parent) = output.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
     }
-    let file = File::create(output).with_context(|| format!("creating {}", output.display()))?;
+    // Written beside the target and renamed, so another process never reads half an index.
+    let temporary = output.with_file_name(format!(
+        "{}.{}.tmp",
+        output.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id()
+    ));
+    let file =
+        File::create(&temporary).with_context(|| format!("creating {}", temporary.display()))?;
     let mut writer = BufWriter::new(file);
     if compact {
         serde_json::to_writer(&mut writer, &index.to_compact())?;
@@ -140,7 +149,107 @@ pub fn write_index(index: &Index, output: &Path, compact: bool) -> Result<()> {
         serde_json::to_writer_pretty(&mut writer, index)?;
     }
     writer.flush()?;
+    drop(writer);
+    fs::rename(&temporary, output).with_context(|| format!("writing {}", output.display()))?;
     Ok(())
+}
+
+// Finds the index for a lookup, building or refreshing it so an agent never reads stale line numbers.
+pub fn load_index(explicit: Option<&Path>) -> Result<Index> {
+    if let Some(path) = explicit {
+        return read_index(path);
+    }
+    let current = std::env::current_dir()?;
+    let root = current
+        .ancestors()
+        .find(|dir| dir.join(INDEX_FILE).exists() || dir.join(".git").exists())
+        .with_context(|| {
+            format!(
+                "No index for {}. Run 'drift index' in the repo root.",
+                current.display()
+            )
+        })?;
+    let root = resolve_root(root)?;
+    load_at(&root)
+}
+
+fn load_at(root: &Path) -> Result<Index> {
+    let path = root.join(INDEX_FILE);
+    let raw = fs::read_to_string(&path).ok();
+    let existing: Option<Index> = raw
+        .as_deref()
+        .and_then(|raw| serde_json::from_str(raw).ok());
+
+    let (dirs, files) = match existing {
+        Some(mut index) if !is_stale(&index, root, &path) => {
+            // The index may have been built before the checkout moved.
+            index.root = root.to_string_lossy().into_owned();
+            return Ok(index);
+        }
+        Some(index) => (index.ignore_dirs, index.ignore_files),
+        None => Default::default(),
+    };
+    let index = index_repo(root, &dirs, &files)?;
+
+    // A pretty-printed index was asked for, so keep it that way. Failing to save only costs a rebuild.
+    let compact = raw.as_deref().is_none_or(|raw| !raw.contains('\n'));
+    if raw.is_none() {
+        exclude_from_git(root);
+    }
+    let _ = write_index(&index, &path, compact);
+    Ok(index)
+}
+
+fn is_stale(index: &Index, root: &Path, path: &Path) -> bool {
+    if index.version != SCHEMA_VERSION {
+        return true;
+    }
+    let Some(built) = fs::metadata(path).and_then(|m| m.modified()).ok() else {
+        return true;
+    };
+    let current = walk(root, &index.ignore_dirs, &index.ignore_files);
+    if current.len() != index.files.len() {
+        return true;
+    }
+    current.iter().any(|file| {
+        let relative = file
+            .strip_prefix(root)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_default();
+        !index.files.contains_key(&relative)
+            || fs::metadata(file)
+                .and_then(|m| m.modified())
+                .map_or(true, |modified| modified >= built)
+    })
+}
+
+// An index that appears on its own shouldn't show up as an untracked file.
+fn exclude_from_git(root: &Path) {
+    let ignored = fs::read_to_string(root.join(".gitignore"))
+        .is_ok_and(|text| text.lines().any(|line| line.trim() == INDEX_FILE));
+    let info = root.join(".git").join("info");
+    if ignored || !info.is_dir() {
+        return;
+    }
+    let exclude = info.join("exclude");
+    let mut text = fs::read_to_string(&exclude).unwrap_or_default();
+    if text.lines().any(|line| line.trim() == INDEX_FILE) {
+        return;
+    }
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str(INDEX_FILE);
+    text.push('\n');
+    let _ = fs::write(exclude, text);
+}
+
+pub fn read_source(root: &Path, relative: &str) -> Option<String> {
+    let content = decode(&fs::read(root.join(relative)).ok()?);
+    Some(match content.strip_prefix('\u{feff}') {
+        Some(stripped) => stripped.to_string(),
+        None => content,
+    })
 }
 
 pub fn read_index(path: &Path) -> Result<Index> {
