@@ -1,13 +1,2 @@
-__pycache__/
-*.pyc
-*.pyo
-*.egg-info/
-dist/
-build/
-.venv/
-venv/
+/target/
 .drift-index.json
-*.egg
-.mypy_cache/
-.ruff_cache/
-.pytest_cache/
