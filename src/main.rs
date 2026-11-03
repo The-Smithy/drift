@@ -16,6 +16,11 @@ use model::Index;
 
 const SKILL: &str = include_str!("skill.md");
 
+// musl's allocator contends badly across threads, which made parallel indexing about 3x slower.
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Parser)]
 #[command(
     name = "drift",
