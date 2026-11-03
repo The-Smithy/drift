@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "drift-index"
+version = "0.1.0"
+description = "A blacksmith's tool for shaping codebases into searchable indexes. Fast, regex-based symbol extraction for AI agents."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    {name = "The Smithy", email = "max@thesmithy.io"},
+]
+keywords = ["codebase", "indexer", "ai", "agent", "claude", "symbol", "search"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.scripts]
+drift = "src.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/the-smithy-io/drift"
+Repository = "https://github.com/the-smithy-io/drift"
+Issues = "https://github.com/the-smithy-io/drift/issues"
+
+[tool.setuptools.packages.find]
+include = ["src*"]
