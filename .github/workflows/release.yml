@@ -1,0 +1,126 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # These two build and check every archive without publishing, so a broken
+  # release shows up before a tag is pushed.
+  pull_request:
+    branches: [master]
+    paths:
+      - .github/workflows/release.yml
+      - Cargo.lock
+      - Cargo.toml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Statically link the C runtime so the binary doesn't need the Visual C++ redistributable.
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            rustflags: -C target-feature=+crt-static
+          # musl links statically, so the binary runs on any distro, whatever its glibc version.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-26-intel
+            target: x86_64-apple-darwin
+    env:
+      TARGET: ${{ matrix.target }}
+      RUSTFLAGS: ${{ matrix.rustflags }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install musl C compiler
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --target "$TARGET" --no-self-update
+          rustup default stable
+      - run: cargo test --locked --target "$TARGET"
+      - run: cargo build --release --locked --target "$TARGET"
+      - name: Package
+        run: |
+          if [ "$RUNNER_OS" = Windows ]; then
+            archive="drift-$TARGET.zip"
+            7z a -tzip "$archive" "./target/$TARGET/release/drift.exe" LICENSE README.md
+          else
+            archive="drift-$TARGET.tar.gz"
+            tar czf "$archive" -C "target/$TARGET/release" drift -C "$PWD" LICENSE README.md
+          fi
+          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+      - name: Check the packaged binary
+        run: |
+          unpacked="$RUNNER_TEMP/unpacked"
+          mkdir "$unpacked"
+          if [ "$RUNNER_OS" = Windows ]; then
+            7z x "$ARCHIVE" -o"$unpacked"
+          else
+            tar xz -C "$unpacked" drift < "$ARCHIVE"
+          fi
+          drift="$unpacked/drift"
+
+          version=$("$drift" --version)
+          echo "$version"
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$version" != "drift ${GITHUB_REF_NAME#v}" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match '$version'. Update the version in Cargo.toml."
+            exit 1
+          fi
+
+          "$drift" index . --compact -o "$RUNNER_TEMP/index.json"
+          "$drift" query main --index "$RUNNER_TEMP/index.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.ARCHIVE }}
+          path: ${{ env.ARCHIVE }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Prepare and publish
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: drift-*
+          merge-multiple: true
+          path: dist
+      - name: Write checksums
+        working-directory: dist
+        run: |
+          sha256sum drift-* > SHA256SUMS
+          cat SHA256SUMS
+      - name: Publish release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          flags=(--verify-tag --generate-notes --title "$TAG")
+          case "$TAG" in
+            *-*) flags+=(--prerelease) ;;
+          esac
+          gh release create "$TAG" "${flags[@]}" dist/*

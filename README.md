@@ -34,6 +34,37 @@ $ drift query UserController
 
 ## Install
 
+### Prebuilt binary
+
+Download the archive for your platform from the [latest release](https://github.com/The-Smithy/drift/releases/latest). It holds a single `drift` binary with no runtime dependencies, so you don't need Rust or a C compiler.
+
+| Platform | Archive |
+|----------|---------|
+| Windows x86_64 | [`drift-x86_64-pc-windows-msvc.zip`](https://github.com/The-Smithy/drift/releases/latest/download/drift-x86_64-pc-windows-msvc.zip) |
+| Linux x86_64 | [`drift-x86_64-unknown-linux-musl.tar.gz`](https://github.com/The-Smithy/drift/releases/latest/download/drift-x86_64-unknown-linux-musl.tar.gz) |
+| macOS Apple silicon | [`drift-aarch64-apple-darwin.tar.gz`](https://github.com/The-Smithy/drift/releases/latest/download/drift-aarch64-apple-darwin.tar.gz) |
+| macOS Intel | [`drift-x86_64-apple-darwin.tar.gz`](https://github.com/The-Smithy/drift/releases/latest/download/drift-x86_64-apple-darwin.tar.gz) |
+
+On Linux or macOS, this installs it to `~/.local/bin`, using the archive name for your platform:
+
+```bash
+mkdir -p ~/.local/bin
+curl -fsSL https://github.com/The-Smithy/drift/releases/latest/download/drift-x86_64-unknown-linux-musl.tar.gz | tar xz -C ~/.local/bin drift
+```
+
+On Windows, in PowerShell:
+
+```powershell
+Invoke-WebRequest https://github.com/The-Smithy/drift/releases/latest/download/drift-x86_64-pc-windows-msvc.zip -OutFile drift.zip
+Expand-Archive drift.zip "$env:LOCALAPPDATA\Programs\drift"
+```
+
+Then add that folder to your `PATH`.
+
+The binaries aren't signed. If macOS blocks one you downloaded in a browser, run `xattr -d com.apple.quarantine drift`. Each release also has a `SHA256SUMS` file for checking your download.
+
+### From source
+
 Installing from source needs a recent stable [Rust](https://rustup.rs) and a C compiler, because the tree-sitter grammars are written in C.
 
 ```bash
