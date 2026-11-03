@@ -23,14 +23,42 @@
 
 AI coding agents waste tokens on exploration. Finding where `UserController` is defined can cost thousands of tokens in grep output and file reads, just to land on one line.
 
-Drift builds a `.drift-index.json` that maps every symbol to its exact file and line range. An agent runs one short lookup, then reads only those lines.
+Drift indexes your code, then answers those questions directly. An agent runs one short lookup and reads only the lines it needs.
 
 ```console
 $ drift query UserController
-  class        UserController  src/controllers/user.ts:12-140 (exported)
+class UserController  src/controllers/user.ts:12-140 (exported)
 ```
 
-The same goes for understanding a file. On a 418-line file, `drift outline` returned 1.5 KB, where reading the file costs 22 KB and reading the repo's index costs about 800 KB.
+### Measured savings
+
+`drift bench` runs a standard set of tasks on any repo. Here it is on four public projects pinned in [`bench/corpus.txt`](bench/corpus.txt):
+
+| Repo | Tokens without Drift | Tokens with Drift | Saved |
+|------|----------------------|-------------------|-------|
+| [flask](https://github.com/pallets/flask) | 197,213 | 9,886 | 95.0% |
+| [express](https://github.com/expressjs/express) | 48,142 | 2,953 | 93.9% |
+| [ripgrep](https://github.com/BurntSushi/ripgrep) | 301,618 | 11,692 | 96.1% |
+| [vue core](https://github.com/vuejs/core) | 155,110 | 10,771 | 93.1% |
+
+And by task, across all four:
+
+| Task | Without Drift, compared with | Saved |
+|------|------------------------------|-------|
+| See a signature | Reading the file | 98–99% |
+| Read one function | Reading the file | 91–99% |
+| Find a definition | Grep | 89–97% |
+| Understand a file | Reading the file | 87–95% |
+| Find a file's tests | Grep | 80–99% |
+| Find uses | Grep | 56–81% |
+| Find importers | Grep | 68–97% |
+| Orient in the repo | Listing every file | 52–92% |
+
+These count tool output at about 4 bytes per token. The comparison is generous to the alternatives: searches stop at 250 lines and reads at 2,000, as they do in Claude Code. Results vary by repo, so run it on yours:
+
+```bash
+drift bench .
+```
 
 **Tested across 27 real repos:** 4,595 files and 924,000 lines, giving 43,604 symbols and 5,101 test cases, indexed in about 2.5 seconds on one Windows machine. Every symbol was checked against its source file, and the name was at the recorded location in all of them.
 
@@ -77,54 +105,46 @@ This puts a single `drift` binary on your `PATH`. It has no runtime dependencies
 
 ## Quick Start
 
-**Index a repo:**
+There's nothing to set up. Run a lookup anywhere in a git repo, and Drift builds its index on first use and keeps it fresh after that.
 
 ```bash
-drift index . --compact
+drift map                         # Get oriented in a repo
+drift query UserController        # Find a definition
+drift show UserController         # Read just that definition
+drift outline src/lib/auth.ts     # See what a file contains
+drift refs verifyToken            # Find where something is used
+drift context src/lib/auth.ts     # Get what you need before changing it
 ```
 
-**Look up a symbol:**
+**Teach your agent to use it:**
 
 ```bash
-drift query UserController
+drift install . --instructions
 ```
 
-**See what a file contains, find its tests, and find who imports it:**
-
-```bash
-drift outline src/lib/auth.ts
-drift tests auth
-drift importers src/lib/auth.ts
-```
-
-**Index every repo under a directory:**
-
-```bash
-drift batch ~/Development --compact
-```
-
-**Teach Claude Code to use the index in a repo:**
-
-```bash
-drift install .
-```
-
-This writes `.claude/skills/drift/SKILL.md`, which tells agents to use these lookups before grepping.
-
-Add `.drift-index.json` to your `.gitignore`. It contains an absolute path and goes stale quickly.
+This adds the Claude Code skill, a short section in `CLAUDE.md` or `AGENTS.md`, and a `.gitignore` entry for the index.
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `drift index [path]` | Index a repo and write `.drift-index.json` |
-| `drift query <symbol>` | Find where a symbol is defined. Exact names match first, then case-insensitive substrings |
-| `drift outline <file>` | List a file's symbols with line ranges, and its imports. Takes a full path or a trailing part such as `lib/auth.ts` |
+| `drift query <symbol>...` | Find where symbols are defined. Exact names match first, then case-insensitive substrings |
+| `drift find <words>...` | Search names, doc comments and paths by words in any order, so `rate limit` finds `enforceRateLimit` |
+| `drift show <symbol>` | Print one definition's source. Takes a name, `Parent.name` or `path:name` |
+| `drift sig <symbol>...` | Print only a definition's signature and doc comment |
+| `drift outline <file>` | List a file's definitions with line ranges, and its imports. Add `--sig` for signatures |
+| `drift refs <symbol>` | Find uses, by file and enclosing definition, leaving out comments, strings and imports. Matches by name, not by type |
 | `drift tests [text]` | With no text, summarize every test file. With text, show the tests whose path, suite or name contains it |
+| `drift tests --for <file>` | Find the tests for a source file |
 | `drift importers <module>` | Find the files that import a module. A file path resolves relative imports and `@/` or `~/` aliases in JS and TS, module paths in Python, and `use` paths and `mod` declarations in Rust. Anything else matches as text in the import source |
+| `drift context <target>` | Get what you need before changing a symbol or file: signature, uses, importers and tests |
+| `drift map` | Summarize a repo: folders, entry points and most imported files |
+| `drift changes [ref]` | List the definitions changed since a git ref, including uncommitted work |
+| `drift bench [path]` | Measure token savings on a repo with a standard set of tasks |
+| `drift index [path]` | Build the index yourself. Lookups normally do this on their own |
 | `drift stats` | Show index statistics |
 | `drift batch <parent>` | Index every git repo directly under a directory |
-| `drift install [path]` | Install the Claude Code skill into a repo |
+| `drift install [path]` | Install the Claude Code skill and ignore the index in a repo |
 
 ### Options
 
@@ -135,7 +155,17 @@ Add `.drift-index.json` to your `.gitignore`. It contains an absolute path and g
 | `--ignore-dirs` | `index` | Extra directory names to skip |
 | `--ignore-files` | `index` | Extra file names to skip |
 | `--install` | `batch` | Also install the Claude Code skill in each repo |
-| `--index` | `query`, `outline`, `tests`, `importers`, `stats` | Path to the index file (default: `.drift-index.json`) |
+| `--instructions` | `install` | Also add agent instructions to `CLAUDE.md` or `AGENTS.md`. `--file` picks another file |
+| `--hook` | `install` | Also add a Claude Code hook that points agents to Drift. It never blocks a tool |
+| `--in <path>` | Lookups | Only look in this folder |
+| `--limit <n>` | Lookups | Show at most this many lines, replacing the default size cap |
+| `--all` | Lookups | Show everything |
+| `--index <file>` | Lookups, `stats` | Use this index file as is, without refreshing it |
+| `--json` | `bench` | Print the report as JSON, to save for `--compare` |
+| `--compare <file>` | `bench` | Compare with a report saved earlier |
+| `--check <percent>` | `bench` | Fail unless savings reach this percent and 90% of answers are right |
+
+Lookups stop at a size cap, 4 KB for most and 12 KB for `show`, and say how much they left out. Results come best first: exported source, private source, tests, then fixtures, generated files and migrations.
 
 ## Supported Languages
 
@@ -163,13 +193,13 @@ Drift walks your repo in parallel and parses each file with [tree-sitter](https:
 
 For each file it records:
 
-1. **Symbols:** definitions with their line ranges, whether they are exported, and their parent class, impl or module
+1. **Symbols:** definitions with their line ranges, signatures, first doc comment line, whether they are exported, and their parent class, impl or module
 2. **Imports:** what the file depends on, including re-exports, `require()` and dynamic `import()`
 3. **Tests:** suites and individual cases with line numbers
 
 ### What it doesn't capture
 
-- Usages. The index records where things are defined, not where they are called.
+- Types. `drift refs` finds uses by name when you ask, so unrelated things that share a common name can appear.
 - Generated symbols, such as Rust macro expansions or names built at runtime.
 - Local variables and functions nested inside JS or TS functions. Python nested functions are included.
 - Interface and struct members.
@@ -229,17 +259,17 @@ This example shows compact output. Without `--compact`, every field is present, 
 
 See [AGENTS.md](AGENTS.md) for detailed integration instructions.
 
-**The short version:** use `drift query`, `drift outline`, `drift tests` and `drift importers` before grepping, then read only the lines you need. Don't read the index file itself. A large repo's index runs to hundreds of kilobytes, and with `--compact` it is a single line.
+**The short version:** use Drift's lookups before grepping, then read only the lines you need. Don't read the index file itself. A large repo's index runs to hundreds of kilobytes, and with `--compact` it is a single line.
 
 ### Claude Code
 
-Run `drift install .` in any repo. Claude Code will then load the skill when working on supported file types.
+Run `drift install . --instructions` in any repo. Add `--hook` if you also want a note when an agent greps for a name the index knows or reads a large file.
 
 ### Other AI tools
 
 Add this to your agent's instructions file:
 
-> Before grepping or reading whole files, use Drift: `drift query <symbol>` finds a definition, `drift outline <file>` lists a file's symbols and imports, `drift tests <text>` finds tests, and `drift importers <path>` finds who imports a module. Read only the line ranges they print. Do not read `.drift-index.json` directly, because it is large.
+> Before grepping or reading whole files, use Drift: `drift query <symbol>` finds a definition, `drift show <symbol>` prints it, `drift outline <file>` lists a file's definitions and imports, `drift refs <symbol>` finds uses, and `drift map` orients you in a repo. Do not read `.drift-index.json` directly, because it is large.
 
 ## Contributing
 

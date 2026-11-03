@@ -1,96 +1,415 @@
+use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::path::Path;
 
-use anyhow::Result;
+use rayon::prelude::*;
 
-use crate::extract::split_top_level;
-use crate::index::read_index;
-use crate::model::{Import, ImportNames, Index, Symbol, TestSuite};
+use crate::extract;
+use crate::imports::{
+    RustLocation, declares_module, ends_with_path, module_key, points_at, rust_path_reaches,
+    use_paths,
+};
+use crate::index::read_source;
+use crate::model::{Import, ImportNames, Index, Symbol, TestFile, TestSuite};
 
-const SOURCE_EXTENSIONS: &[&str] = &[
-    ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".py", ".rs",
-];
+// Default output caps. Reading a definition is what `show` is for, so it gets more room.
+pub const LOOKUP_CAP: usize = 4 * 1024;
+pub const SOURCE_CAP: usize = 12 * 1024;
+pub const BUNDLE_CAP: usize = 6 * 1024;
 
-pub fn query(query: &str, index_path: &Path) -> Result<()> {
-    let index = read_index(index_path)?;
+const MAX_LINE_TEXT: usize = 100;
+const CONTEXT_ITEMS: usize = 8;
 
-    // Reads `files`, not `symbol_index`: compact indexes drop private symbols from the latter.
-    let mut matches = find_symbols(&index, |name| name == query);
-    if matches.is_empty() {
-        let lowered = query.to_lowercase();
-        matches = find_symbols(&index, |name| name.to_lowercase().contains(&lowered));
-    }
-    if matches.is_empty() {
-        no_matches(&format!("No matches for '{query}'"));
-    }
-
-    for (file, symbol) in matches {
-        println!(
-            "  {:12} {}  {}:{}",
-            symbol.kind,
-            symbol.name,
-            file,
-            location_details(symbol)
-        );
-    }
-    Ok(())
+#[derive(Default, Clone)]
+pub struct View {
+    pub limit: Option<usize>,
+    pub all: bool,
+    pub within: Option<String>,
 }
 
-pub fn outline(file: &str, index_path: &Path) -> Result<()> {
-    let index = read_index(index_path)?;
-    let candidates = resolve_file(&index, file);
+impl View {
+    pub fn includes(&self, path: &str) -> bool {
+        let Some(within) = &self.within else {
+            return true;
+        };
+        let within = within.replace('\\', "/");
+        let within = within.trim_start_matches("./").trim_end_matches('/');
+        within.is_empty()
+            || path == within
+            || path
+                .strip_prefix(within)
+                .is_some_and(|rest| rest.starts_with('/'))
+    }
+}
 
-    let path = match candidates.as_slice() {
-        [] => no_matches(&format!("No indexed file matches '{file}'")),
-        [path] => *path,
-        several => {
-            println!("Several files match '{file}':");
-            for path in several {
-                println!("  {path}");
-            }
-            std::process::exit(1);
+pub struct Answer {
+    pub lines: Vec<String>,
+    pub found: bool,
+}
+
+impl Answer {
+    fn found(lines: Vec<String>) -> Self {
+        Answer { lines, found: true }
+    }
+
+    fn missing(message: String) -> Self {
+        Answer {
+            lines: vec![message],
+            found: false,
         }
-    };
+    }
+}
 
-    let entry = &index.files[path];
-    println!("{path}  {}, {} lines", entry.lang, entry.lines);
-    for symbol in &entry.symbols {
-        println!(
-            "  {:12} {}  {}",
-            symbol.kind,
-            symbol.name,
-            location_details(symbol)
+pub fn counted(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
+}
+
+pub fn fit(lines: &[String], view: &View, cap: usize) -> String {
+    let mut out = String::new();
+    let mut shown = 0;
+    for line in lines {
+        let over_limit = !view.all && view.limit.is_some_and(|limit| shown >= limit);
+        let over_cap =
+            !view.all && view.limit.is_none() && shown > 0 && out.len() + line.len() + 1 > cap;
+        if over_limit || over_cap {
+            break;
+        }
+        out.push_str(line);
+        out.push('\n');
+        shown += 1;
+    }
+    if shown < lines.len() {
+        out.push_str(&format!(
+            "... {} more {}. Narrow with --in <path> or --limit <n>, or use --all.\n",
+            lines.len() - shown,
+            if lines.len() - shown == 1 {
+                "line"
+            } else {
+                "lines"
+            }
+        ));
+    }
+    out
+}
+
+pub fn deliver(answer: Answer, view: &View, cap: usize) {
+    print!("{}", fit(&answer.lines, view, cap));
+    if !answer.found {
+        std::process::exit(1);
+    }
+}
+
+// Source first, then tests, then code an agent rarely means: fixtures, generated files, migrations.
+pub fn path_tier(path: &str) -> u8 {
+    let lowered = path.to_lowercase();
+    let mut segments = lowered.split('/');
+    let file = segments.next_back().unwrap_or("");
+    let directories: Vec<&str> = segments.collect();
+
+    const LOW: &[&str] = &[
+        "golden",
+        "fixtures",
+        "fixture",
+        "__fixtures__",
+        "__snapshots__",
+        "generated",
+        "third_party",
+        "migrations",
+        "template",
+        "templates",
+        "examples",
+        "example",
+        "public",
+    ];
+    if directories.iter().any(|d| LOW.contains(d))
+        || file.ends_with(".d.ts")
+        || file.contains(".gen.")
+        || file.contains(".generated.")
+    {
+        return 2;
+    }
+    const TESTS: &[&str] = &["tests", "test", "__tests__", "spec", "e2e"];
+    let stem = file.split('.').next().unwrap_or("");
+    if directories.iter().any(|d| TESTS.contains(d))
+        || file.contains(".test.")
+        || file.contains(".spec.")
+        || stem.starts_with("test_")
+        || stem.ends_with("_test")
+    {
+        return 1;
+    }
+    0
+}
+
+fn is_migration(path: &str) -> bool {
+    path.split('/').any(|segment| segment == "migrations")
+}
+
+fn compare_paths(a: &str, b: &str) -> Ordering {
+    // The newest migration is the definition that's live now.
+    if is_migration(a) && is_migration(b) {
+        b.cmp(a)
+    } else {
+        a.cmp(b)
+    }
+}
+
+type Located<'a> = (&'a str, &'a Symbol);
+
+fn rank(matches: &mut [Located]) {
+    matches.sort_by(|(a_path, a), (b_path, b)| {
+        (path_tier(a_path), !a.exported)
+            .cmp(&(path_tier(b_path), !b.exported))
+            .then_with(|| compare_paths(a_path, b_path))
+            .then_with(|| a.line.cmp(&b.line))
+    });
+}
+
+fn symbols_where<'a>(
+    index: &'a Index,
+    view: &View,
+    accept: impl Fn(&str, &Symbol) -> bool,
+) -> Vec<Located<'a>> {
+    let mut matches: Vec<Located> = index
+        .files
+        .iter()
+        .filter(|(path, _)| view.includes(path))
+        .flat_map(|(path, file)| file.symbols.iter().map(move |s| (path.as_str(), s)))
+        .filter(|(path, symbol)| accept(path, symbol))
+        .collect();
+    rank(&mut matches);
+    matches
+}
+
+// `name`, `Parent.name` or `path:name`.
+fn exact_matches<'a>(index: &'a Index, selector: &str, view: &View) -> Vec<Located<'a>> {
+    let (file, name) = match selector.rsplit_once(':') {
+        Some((file, name)) if !file.is_empty() && !name.is_empty() && !file.ends_with(':') => {
+            (Some(file), name)
+        }
+        _ => (None, selector),
+    };
+    let wanted_file = file.map(|file| normalize_path(file, &index.root));
+    let (parent, name) = match name.rsplit_once('.') {
+        Some((parent, name)) if !name.is_empty() => (Some(parent), name),
+        _ => (None, name),
+    };
+    symbols_where(index, view, |path, symbol| {
+        symbol.name == name
+            && parent.is_none_or(|parent| symbol.parent.as_deref() == Some(parent))
+            && wanted_file
+                .as_ref()
+                .is_none_or(|wanted| path == wanted || ends_with_path(path, wanted))
+    })
+}
+
+fn range(symbol: &Symbol) -> String {
+    match symbol.end_line {
+        Some(end) if end != symbol.line => format!("{}-{}", symbol.line, end),
+        _ => symbol.line.to_string(),
+    }
+}
+
+fn details(symbol: &Symbol) -> String {
+    let exported = if symbol.exported { " (exported)" } else { "" };
+    let parent = symbol
+        .parent
+        .as_ref()
+        .map(|p| format!(" in {p}"))
+        .unwrap_or_default();
+    format!("{exported}{parent}")
+}
+
+fn symbol_line(path: &str, symbol: &Symbol) -> String {
+    format!(
+        "{} {}  {}:{}{}",
+        symbol.kind,
+        symbol.name,
+        path,
+        range(symbol),
+        details(symbol)
+    )
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut previous = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let current = row[j + 1];
+            row[j + 1] = (previous + usize::from(ca != *cb))
+                .min(row[j] + 1)
+                .min(current + 1);
+            previous = current;
+        }
+    }
+    row[b.len()]
+}
+
+fn suggestions(index: &Index, name: &str) -> Vec<String> {
+    let lowered = name.to_lowercase();
+    let allowed = (lowered.chars().count() / 3).max(2);
+    let names: BTreeSet<&str> = index
+        .files
+        .values()
+        .flat_map(|file| &file.symbols)
+        .map(|symbol| symbol.name.as_str())
+        .collect();
+    let mut close: Vec<(usize, &str)> = names
+        .into_iter()
+        .filter_map(|candidate| {
+            let lower = candidate.to_lowercase();
+            // Length can only add to the distance, so this skips most names cheaply.
+            if lower.chars().count().abs_diff(lowered.chars().count()) > allowed {
+                return None;
+            }
+            let distance = edit_distance(&lowered, &lower);
+            (distance <= allowed).then_some((distance, candidate))
+        })
+        .collect();
+    close.sort();
+    close
+        .into_iter()
+        .take(3)
+        .map(|(_, name)| name.to_string())
+        .collect()
+}
+
+fn miss_message(index: &Index, name: &str) -> String {
+    let close = suggestions(index, name);
+    if close.is_empty() {
+        format!("No matches for '{name}'")
+    } else {
+        format!(
+            "No matches for '{name}'. Did you mean: {}?",
+            close.join(", ")
+        )
+    }
+}
+
+pub fn query(index: &Index, names: &[String], view: &View) -> Answer {
+    let grouped = names.len() > 1;
+    let mut lines = Vec::new();
+    let mut found = false;
+
+    for name in names {
+        let mut matches = exact_matches(index, name, view);
+        if matches.is_empty() {
+            let lowered = name.to_lowercase();
+            matches = symbols_where(index, view, |_, symbol| {
+                symbol.name.to_lowercase().contains(&lowered)
+            });
+        }
+        if grouped {
+            lines.push(format!("{name}:"));
+        }
+        let indent = if grouped { "  " } else { "" };
+        if matches.is_empty() {
+            lines.push(format!("{indent}{}", miss_message(index, name)));
+            continue;
+        }
+        found = true;
+        lines.extend(
+            matches
+                .iter()
+                .map(|(path, symbol)| format!("{indent}{}", symbol_line(path, symbol))),
         );
+    }
+    Answer { lines, found }
+}
+
+fn single_file<'a>(index: &'a Index, file: &str) -> Result<&'a str, Answer> {
+    let candidates = resolve_file(index, file);
+    match candidates.as_slice() {
+        [] => Err(Answer::missing(format!("No indexed file matches '{file}'"))),
+        [path] => Ok(path),
+        several => {
+            let mut lines = vec![format!("Several files match '{file}':")];
+            lines.extend(several.iter().map(|path| format!("  {path}")));
+            Err(Answer {
+                lines,
+                found: false,
+            })
+        }
+    }
+}
+
+pub fn outline(index: &Index, file: &str, signatures: bool) -> Answer {
+    let path = match single_file(index, file) {
+        Ok(path) => path,
+        Err(answer) => return answer,
+    };
+    let entry = &index.files[path];
+    let mut lines = vec![format!("{path}  {}, {} lines", entry.lang, entry.lines)];
+    for symbol in &entry.symbols {
+        let shown = signatures
+            .then_some(symbol.signature.as_deref())
+            .flatten()
+            .map_or_else(
+                || format!("{} {}", symbol.kind, symbol.name),
+                str::to_string,
+            );
+        lines.push(format!("  {shown}  {}{}", range(symbol), details(symbol)));
     }
     if !entry.imports.is_empty() {
-        println!("Imports:");
-        for import in &entry.imports {
-            println!("  {}", describe_import(import));
-        }
+        lines.push("Imports:".to_string());
+        lines.extend(
+            entry
+                .imports
+                .iter()
+                .map(|import| format!("  {}", describe_import(import))),
+        );
     }
-    Ok(())
+    Answer::found(lines)
 }
 
-pub fn tests(pattern: Option<&str>, index_path: &Path) -> Result<()> {
-    let index = read_index(index_path)?;
+fn test_count(file: &TestFile) -> usize {
+    file.suites.iter().map(|suite| suite.cases.len()).sum()
+}
 
+fn test_summary(path: &str, file: &TestFile) -> String {
+    format!(
+        "{path}  {}  {}",
+        file.framework,
+        counted(test_count(file), "test")
+    )
+}
+
+pub fn tests(index: &Index, pattern: Option<&str>, view: &View) -> Answer {
     let Some(pattern) = pattern else {
-        for (path, file) in &index.tests {
-            let count: usize = file.suites.iter().map(|s| s.cases.len()).sum();
-            println!("  {path}  {}  {count} tests", file.framework);
-        }
-        println!(
-            "{} tests across {} files",
-            index.test_count(),
-            index.tests.len()
+        let in_scope: Vec<_> = index
+            .tests
+            .iter()
+            .filter(|(path, _)| view.includes(path))
+            .collect();
+        let total: usize = in_scope.iter().map(|(_, file)| test_count(file)).sum();
+        let mut lines: Vec<String> = in_scope
+            .iter()
+            .map(|(path, file)| test_summary(path, file))
+            .collect();
+        // A total printed last would be lost when the list is cut, so it goes first.
+        lines.insert(
+            0,
+            format!(
+                "{} across {}",
+                counted(total, "test"),
+                counted(in_scope.len(), "file")
+            ),
         );
-        return Ok(());
+        return Answer::found(lines);
     };
 
     let lowered = pattern.to_lowercase();
     let contains = |text: &str| text.to_lowercase().contains(&lowered);
-    let mut found = false;
+    let mut lines = Vec::new();
 
-    for (path, file) in &index.tests {
+    for (path, file) in index.tests.iter().filter(|(path, _)| view.includes(path)) {
         let path_matches = contains(path);
         let suites: Vec<(&TestSuite, Vec<_>)> = file
             .suites
@@ -108,25 +427,75 @@ pub fn tests(pattern: Option<&str>, index_path: &Path) -> Result<()> {
         if suites.is_empty() {
             continue;
         }
-
-        found = true;
-        println!("{path}  {}", file.framework);
+        lines.push(format!("{path}  {}", file.framework));
         for (suite, cases) in suites {
-            println!("  {}  (line {})", suite.name, suite.line);
-            for case in cases {
-                println!("    {}  {}", case.line, case.name);
-            }
+            lines.push(format!("  {}  (line {})", suite.name, suite.line));
+            lines.extend(
+                cases
+                    .into_iter()
+                    .map(|case| format!("    {}  {}", case.line, case.name)),
+            );
         }
     }
-    if !found {
-        no_matches(&format!("No tests match '{pattern}'"));
+    if lines.is_empty() {
+        return Answer::missing(format!("No tests match '{pattern}'"));
     }
-    Ok(())
+    Answer::found(lines)
 }
 
-pub fn importers(module: &str, index_path: &Path) -> Result<()> {
-    let index = read_index(index_path)?;
-    let target_path = match resolve_file(&index, module).as_slice() {
+fn base_name(path: &str) -> &str {
+    let file = path.rsplit('/').next().unwrap_or(path);
+    let stem = file.split('.').next().unwrap_or(file);
+    let stem = stem.strip_prefix("test_").unwrap_or(stem);
+    stem.strip_suffix("_test").unwrap_or(stem)
+}
+
+// Test files for a source file: its own inline tests, ones that import it, and ones named after it.
+pub fn tests_of<'a>(index: &'a Index, path: &str) -> Vec<(&'a str, &'a TestFile)> {
+    let importing: BTreeSet<String> = importers_of(index, path)
+        .into_iter()
+        .map(|importer| importer.path)
+        .collect();
+    let base = base_name(path);
+    let generic = matches!(base, "index" | "mod" | "lib" | "main" | "__init__");
+    index
+        .tests
+        .iter()
+        .filter(|(test_path, _)| {
+            test_path.as_str() == path
+                || importing.contains(test_path.as_str())
+                || (!generic && base_name(test_path) == base)
+        })
+        .map(|(test_path, file)| (test_path.as_str(), file))
+        .collect()
+}
+
+pub fn tests_for(index: &Index, file: &str) -> Answer {
+    let path = match single_file(index, file) {
+        Ok(path) => path,
+        Err(answer) => return answer,
+    };
+    let found = tests_of(index, path);
+    if found.is_empty() {
+        return Answer::missing(format!(
+            "No tests import {path}, are named after it, or sit inside it"
+        ));
+    }
+    Answer::found(
+        found
+            .into_iter()
+            .map(|(test_path, test_file)| test_summary(test_path, test_file))
+            .collect(),
+    )
+}
+
+pub struct Importer {
+    pub path: String,
+    pub detail: String,
+}
+
+pub fn importers_of(index: &Index, module: &str) -> Vec<Importer> {
+    let target_path = match resolve_file(index, module).as_slice() {
         [only] => only.to_string(),
         _ => normalize_path(module, &index.root),
     };
@@ -135,7 +504,7 @@ pub fn importers(module: &str, index_path: &Path) -> Result<()> {
         .ends_with(".rs")
         .then(|| RustLocation::of(&target_path, &index.repo));
     let lowered = module.to_lowercase();
-    let mut found = false;
+    let mut found = Vec::new();
 
     for (path, file) in &index.files {
         let rust_context = rust_target
@@ -146,8 +515,10 @@ pub fn importers(module: &str, index_path: &Path) -> Result<()> {
         if let Some((from, target)) = &rust_context {
             for symbol in &file.symbols {
                 if declares_module(symbol, from, target) {
-                    found = true;
-                    println!("  {path}  mod {}", symbol.name);
+                    found.push(Importer {
+                        path: path.clone(),
+                        detail: format!("mod {}", symbol.name),
+                    });
                 }
             }
         }
@@ -161,46 +532,389 @@ pub fn importers(module: &str, index_path: &Path) -> Result<()> {
                 || import.source.to_lowercase().contains(&lowered)
                 || points_at(path, &file.lang, import, &target)
             {
-                found = true;
-                println!("  {path}  {}", describe_import(import));
+                found.push(Importer {
+                    path: path.clone(),
+                    detail: describe_import(import),
+                });
             }
         }
     }
-    if !found {
-        no_matches(&format!("No files import '{module}'"));
+    found.sort_by(|a, b| {
+        path_tier(&a.path)
+            .cmp(&path_tier(&b.path))
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    found
+}
+
+pub fn importers(index: &Index, module: &str, view: &View) -> Answer {
+    let lines: Vec<String> = importers_of(index, module)
+        .into_iter()
+        .filter(|importer| view.includes(&importer.path))
+        .map(|importer| format!("{}  {}", importer.path, importer.detail))
+        .collect();
+    if lines.is_empty() {
+        return Answer::missing(format!("No files import '{module}'"));
     }
-    Ok(())
+    Answer::found(lines)
 }
 
-fn no_matches(message: &str) -> ! {
-    println!("{message}");
-    std::process::exit(1);
+pub fn show(index: &Index, selector: &str, view: &View) -> Answer {
+    let matches = exact_matches(index, selector, view);
+    let Some(((path, symbol), others)) = matches.split_first() else {
+        let name = selector.rsplit([':', '.']).next().unwrap_or(selector);
+        return Answer::missing(miss_message(index, name));
+    };
+    let Some(source) = read_source(Path::new(&index.root), path) else {
+        return Answer::missing(format!("Can't read {path}"));
+    };
+    let start = symbol.line as usize - 1;
+    let end = symbol.end_line.unwrap_or(symbol.line) as usize;
+
+    let mut lines = vec![symbol_line(path, symbol)];
+    lines.extend(
+        source
+            .lines()
+            .skip(start)
+            .take(end.saturating_sub(start))
+            .map(str::to_string),
+    );
+    if !others.is_empty() {
+        let also: Vec<String> = others
+            .iter()
+            .take(3)
+            .map(|(path, symbol)| format!("{path}:{}", range(symbol)))
+            .collect();
+        let more = others.len().saturating_sub(also.len());
+        let suffix = if more > 0 {
+            format!(" and {more} more")
+        } else {
+            String::new()
+        };
+        lines.push(format!(
+            "Also defined at {}{suffix}. Pick one with path:name.",
+            also.join(", ")
+        ));
+    }
+    Answer::found(lines)
 }
 
-fn find_symbols(index: &Index, matches: impl Fn(&str) -> bool) -> Vec<(&str, &Symbol)> {
-    index
+fn signature_lines(path: &str, symbol: &Symbol) -> Vec<String> {
+    let mut lines = vec![format!("{path}:{}{}", range(symbol), details(symbol))];
+    match &symbol.signature {
+        Some(signature) => lines.push(format!("  {signature}")),
+        None => lines.push(format!("  {} {}", symbol.kind, symbol.name)),
+    }
+    if let Some(doc) = &symbol.doc {
+        lines.push(format!("  {doc}"));
+    }
+    lines
+}
+
+pub fn sig(index: &Index, names: &[String], view: &View) -> Answer {
+    let mut lines = Vec::new();
+    let mut found = false;
+    for name in names {
+        let matches = exact_matches(index, name, view);
+        if matches.is_empty() {
+            lines.push(miss_message(index, name));
+            continue;
+        }
+        found = true;
+        for (path, symbol) in matches {
+            lines.extend(signature_lines(path, symbol));
+        }
+    }
+    Answer { lines, found }
+}
+
+fn name_words(name: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut current = String::new();
+    let mut previous_lower = false;
+    for c in name.chars() {
+        if !c.is_alphanumeric() {
+            if !current.is_empty() {
+                words.push(std::mem::take(&mut current));
+            }
+            previous_lower = false;
+            continue;
+        }
+        if c.is_uppercase() && previous_lower {
+            words.push(std::mem::take(&mut current));
+        }
+        previous_lower = c.is_lowercase() || c.is_numeric();
+        current.extend(c.to_lowercase());
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+pub fn find(index: &Index, query: &[String], view: &View) -> Answer {
+    let wanted: Vec<String> = query.iter().flat_map(|word| name_words(word)).collect();
+    if wanted.is_empty() {
+        return Answer::missing("Nothing to search for".to_string());
+    }
+
+    let mut scored: Vec<(u32, &str, &Symbol)> = Vec::new();
+    for (path, file) in index.files.iter().filter(|(path, _)| view.includes(path)) {
+        let lowered_path = path.to_lowercase();
+        for symbol in &file.symbols {
+            let words = name_words(&symbol.name);
+            let doc = symbol.doc.as_deref().unwrap_or("").to_lowercase();
+            let mut score = 0;
+            let mut all_found = true;
+            for word in &wanted {
+                if words.iter().any(|candidate| candidate == word) {
+                    score += 4;
+                } else if words
+                    .iter()
+                    .any(|candidate| candidate.starts_with(word.as_str()))
+                {
+                    score += 3;
+                } else if doc.contains(word.as_str()) || lowered_path.contains(word.as_str()) {
+                    score += 1;
+                } else {
+                    all_found = false;
+                    break;
+                }
+            }
+            if all_found {
+                scored.push((score, path, symbol));
+            }
+        }
+    }
+    if scored.is_empty() {
+        return Answer::missing(format!("No matches for '{}'", query.join(" ")));
+    }
+    scored.sort_by(|(a_score, a_path, a), (b_score, b_path, b)| {
+        b_score
+            .cmp(a_score)
+            .then_with(|| (path_tier(a_path), !a.exported).cmp(&(path_tier(b_path), !b.exported)))
+            .then_with(|| a_path.cmp(b_path))
+            .then_with(|| a.line.cmp(&b.line))
+    });
+    Answer::found(
+        scored
+            .into_iter()
+            .map(|(_, path, symbol)| {
+                let line = symbol_line(path, symbol);
+                match &symbol.doc {
+                    Some(doc) => format!("{line}  # {doc}"),
+                    None => line,
+                }
+            })
+            .collect(),
+    )
+}
+
+pub struct FileReferences {
+    pub path: String,
+    pub hits: Vec<Reference>,
+}
+
+pub struct Reference {
+    pub line: u32,
+    pub enclosing: Option<String>,
+    pub text: String,
+}
+
+pub fn innermost_symbol(symbols: &[Symbol], line: u32) -> Option<&Symbol> {
+    symbols
+        .iter()
+        .filter(|symbol| symbol.line <= line && symbol.end_line.is_some_and(|end| line <= end))
+        .min_by_key(|symbol| symbol.end_line.unwrap_or(symbol.line) - symbol.line)
+}
+
+pub fn references(index: &Index, name: &str, view: &View) -> Vec<FileReferences> {
+    let name = name.rsplit(['.', ':']).next().unwrap_or(name);
+    let root = Path::new(&index.root);
+    let entries: Vec<_> = index
         .files
         .iter()
-        .flat_map(|(path, file)| file.symbols.iter().map(move |s| (path.as_str(), s)))
-        .filter(|(_, symbol)| matches(&symbol.name))
-        .collect()
+        .filter(|(path, _)| view.includes(path))
+        .collect();
+
+    let mut found: Vec<FileReferences> = entries
+        .par_iter()
+        .filter_map(|(path, file)| {
+            let source = read_source(root, path)?;
+            if !source.contains(name) {
+                return None;
+            }
+            let extension = Path::new(path.as_str())
+                .extension()?
+                .to_str()?
+                .to_lowercase();
+            let lines: Vec<&str> = source.lines().collect();
+            let hits: Vec<Reference> = extract::reference_lines(&extension, &source, name)
+                .into_iter()
+                .filter(|line| {
+                    !file
+                        .symbols
+                        .iter()
+                        .any(|symbol| symbol.name == name && symbol.line == *line)
+                })
+                .map(|line| Reference {
+                    line,
+                    enclosing: innermost_symbol(&file.symbols, line)
+                        .map(|symbol| symbol.name.clone()),
+                    text: lines
+                        .get(line as usize - 1)
+                        .map(|text| shorten(text.trim()))
+                        .unwrap_or_default(),
+                })
+                .collect();
+            (!hits.is_empty()).then(|| FileReferences {
+                path: (*path).clone(),
+                hits,
+            })
+        })
+        .collect();
+    found.sort_by(|a, b| {
+        path_tier(&a.path)
+            .cmp(&path_tier(&b.path))
+            .then_with(|| a.path.cmp(&b.path))
+    });
+    found
 }
 
-fn location_details(symbol: &Symbol) -> String {
-    let range = match symbol.end_line {
-        Some(end) if end != symbol.line => format!("{}-{}", symbol.line, end),
-        _ => symbol.line.to_string(),
+fn shorten(text: &str) -> String {
+    if text.chars().count() <= MAX_LINE_TEXT {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(MAX_LINE_TEXT).collect();
+    format!("{kept}...")
+}
+
+fn reference_line(hit: &Reference) -> String {
+    match &hit.enclosing {
+        Some(enclosing) => format!("  {} {enclosing}: {}", hit.line, hit.text),
+        None => format!("  {} {}", hit.line, hit.text),
+    }
+}
+
+pub fn refs(index: &Index, name: &str, view: &View) -> Answer {
+    let found = references(index, name, view);
+    let total: usize = found.iter().map(|file| file.hits.len()).sum();
+    if total == 0 {
+        let known = !exact_matches(index, name, view).is_empty();
+        let message = if known {
+            format!("No references to '{name}' outside its definition")
+        } else {
+            miss_message(index, name)
+        };
+        return Answer::missing(message);
+    }
+    let mut lines = vec![format!(
+        "{} in {}",
+        counted(total, "reference"),
+        counted(found.len(), "file")
+    )];
+    for file in &found {
+        lines.push(file.path.clone());
+        lines.extend(file.hits.iter().map(reference_line));
+    }
+    Answer::found(lines)
+}
+
+fn is_file_target(index: &Index, target: &str) -> bool {
+    let looks_like_path = target.contains('/') || target.contains('\\') || target.contains('.');
+    let resolves = resolve_file(index, target).len() == 1;
+    resolves && (looks_like_path || exact_matches(index, target, &View::default()).is_empty())
+}
+
+fn push_limited(lines: &mut Vec<String>, heading: String, items: Vec<String>, hint: &str) {
+    if items.is_empty() {
+        return;
+    }
+    lines.push(heading);
+    let total = items.len();
+    lines.extend(
+        items
+            .into_iter()
+            .take(CONTEXT_ITEMS)
+            .map(|item| format!("  {item}")),
+    );
+    if total > CONTEXT_ITEMS {
+        lines.push(format!("  ... {} more: {hint}", total - CONTEXT_ITEMS));
+    }
+}
+
+fn related(lines: &mut Vec<String>, index: &Index, path: &str) {
+    let mut importers: Vec<String> = importers_of(index, path)
+        .into_iter()
+        .map(|importer| importer.path)
+        .collect();
+    importers.dedup();
+    push_limited(
+        lines,
+        format!("Imported by {}:", counted(importers.len(), "file")),
+        importers,
+        &format!("drift importers {path}"),
+    );
+    let tests: Vec<String> = tests_of(index, path)
+        .into_iter()
+        .map(|(test_path, file)| test_summary(test_path, file))
+        .collect();
+    push_limited(
+        lines,
+        "Tests:".to_string(),
+        tests,
+        &format!("drift tests --for {path}"),
+    );
+}
+
+pub fn context(index: &Index, target: &str, view: &View) -> Answer {
+    if is_file_target(index, target) {
+        let path = resolve_file(index, target)[0];
+        let entry = &index.files[path];
+        let mut lines = vec![format!("{path}  {}, {} lines", entry.lang, entry.lines)];
+        for symbol in entry.symbols.iter().filter(|symbol| symbol.exported) {
+            let shown = symbol
+                .signature
+                .clone()
+                .unwrap_or_else(|| format!("{} {}", symbol.kind, symbol.name));
+            lines.push(format!("  {shown}  {}", range(symbol)));
+        }
+        related(&mut lines, index, path);
+        return Answer::found(lines);
+    }
+
+    let matches = exact_matches(index, target, view);
+    let Some(((path, symbol), others)) = matches.split_first() else {
+        return Answer::missing(miss_message(index, target));
     };
-    let exported = if symbol.exported { " (exported)" } else { "" };
-    let parent = symbol
-        .parent
-        .as_ref()
-        .map(|p| format!(" in {p}"))
-        .unwrap_or_default();
-    format!("{range}{exported}{parent}")
+    let mut lines = signature_lines(path, symbol);
+    if !others.is_empty() {
+        lines.push(format!(
+            "Also defined in {} more: drift query {}",
+            counted(others.len(), "place"),
+            symbol.name
+        ));
+    }
+    let callers: Vec<String> = references(index, &symbol.name, view)
+        .iter()
+        .flat_map(|file| {
+            file.hits.iter().map(|hit| match &hit.enclosing {
+                Some(enclosing) => format!("{}:{} {enclosing}", file.path, hit.line),
+                None => format!("{}:{}", file.path, hit.line),
+            })
+        })
+        .collect();
+    push_limited(
+        &mut lines,
+        format!("Used in {}:", counted(callers.len(), "place")),
+        callers,
+        &format!("drift refs {}", symbol.name),
+    );
+    related(&mut lines, index, path);
+    Answer::found(lines)
 }
 
-fn describe_import(import: &Import) -> String {
+pub fn describe_import(import: &Import) -> String {
     match &import.names {
         Some(ImportNames::List(names)) if !names.is_empty() => {
             format!("{}: {}", import.source, names.join(", "))
@@ -217,7 +931,7 @@ fn normalize_path(path: &str, root: &str) -> String {
     relative.strip_prefix("./").unwrap_or(relative).to_string()
 }
 
-fn resolve_file<'a>(index: &'a Index, query: &str) -> Vec<&'a str> {
+pub fn resolve_file<'a>(index: &'a Index, query: &str) -> Vec<&'a str> {
     let wanted = normalize_path(query, &index.root);
     if let Some((path, _)) = index.files.get_key_value(&wanted) {
         return vec![path.as_str()];
@@ -230,500 +944,71 @@ fn resolve_file<'a>(index: &'a Index, query: &str) -> Vec<&'a str> {
         .collect()
 }
 
-fn ends_with_path(path: &str, suffix: &str) -> bool {
-    !suffix.is_empty()
-        && path
-            .strip_suffix(suffix)
-            .is_some_and(|rest| rest.is_empty() || rest.ends_with('/'))
-}
-
-// `src/lib/auth.ts` and `src/lib/auth/index.ts` are both imported as `src/lib/auth`.
-fn module_key(path: &str) -> String {
-    let lowered = path.to_lowercase();
-    let without_extension = SOURCE_EXTENSIONS
-        .iter()
-        .find_map(|extension| lowered.strip_suffix(extension))
-        .unwrap_or(&lowered);
-    let key = without_extension
-        .strip_suffix("/index")
-        .or_else(|| without_extension.strip_suffix("/__init__"))
-        .unwrap_or(without_extension);
-    key.trim_end_matches('/').to_string()
-}
-
-fn points_at(importer: &str, lang: &str, import: &Import, target: &str) -> bool {
-    let Some(resolved) = resolve_source(importer, lang, &import.source) else {
-        return false;
-    };
-    let matches = |candidate: &str| {
-        let key = module_key(candidate);
-        key == target || ends_with_path(target, &key) || ends_with_path(&key, target)
-    };
-    if matches(&resolved) {
-        return true;
-    }
-    // `from . import sibling` names the module in the imported names, not the source.
-    match &import.names {
-        Some(ImportNames::List(names)) if lang == "python" => names
-            .iter()
-            .any(|name| matches(format!("{resolved}/{name}").trim_start_matches('/'))),
-        _ => false,
-    }
-}
-
-struct RustLocation<'a> {
-    crate_root: &'a str,
-    // None outside `src/`: integration tests and examples are not imported by name.
-    crate_name: Option<String>,
-    module: Vec<&'a str>,
-}
-
-impl<'a> RustLocation<'a> {
-    fn of(path: &'a str, repo: &str) -> Self {
-        let src_start = path
-            .rfind("/src/")
-            .map(|index| index + 1)
-            .or_else(|| path.starts_with("src/").then_some(0));
-
-        let (crate_root, relative, crate_name) = match src_start {
-            Some(start) => {
-                let root = &path[..start];
-                let directory = root.trim_end_matches('/').rsplit('/').next().unwrap_or("");
-                let name = if directory.is_empty() {
-                    repo
-                } else {
-                    directory
-                };
-                (root, &path[start + 4..], Some(name.replace('-', "_")))
-            }
-            None => {
-                let split = path.rfind('/').map_or(0, |index| index + 1);
-                (&path[..split], &path[split..], None)
-            }
-        };
-
-        let mut module: Vec<&str> = relative.trim_end_matches(".rs").split('/').collect();
-        if matches!(module.last(), Some(&"mod" | &"lib" | &"main")) {
-            module.pop();
-        }
-        RustLocation {
-            crate_root,
-            crate_name,
-            module,
-        }
-    }
-}
-
-fn declares_module(symbol: &Symbol, from: &RustLocation, target: &RustLocation) -> bool {
-    // `mod name;` fits on one line; an inline `mod name { ... }` is not another file.
-    symbol.kind == "module"
-        && symbol.parent.is_none()
-        && symbol.end_line == Some(symbol.line)
-        && from.crate_root == target.crate_root
-        && from
-            .module
-            .iter()
-            .copied()
-            .chain([symbol.name.as_str()])
-            .eq(target.module.iter().copied())
-}
-
-fn use_paths(import: &Import) -> Vec<Vec<String>> {
-    let base: Vec<String> = import
-        .source
-        .split("::")
-        .filter(|segment| !segment.is_empty())
-        .map(str::to_string)
-        .collect();
-    let mut paths = Vec::new();
-    match &import.names {
-        Some(ImportNames::List(names)) => {
-            for name in names {
-                expand_use_item(&base, name, &mut paths);
-            }
-        }
-        _ => paths.push(base),
-    }
-    paths
-}
-
-fn expand_use_item(prefix: &[String], item: &str, paths: &mut Vec<Vec<String>>) {
-    let mut path = prefix.to_vec();
-    if let Some(open) = item.find('{') {
-        path.extend(
-            item[..open]
-                .split("::")
-                .filter(|segment| !segment.is_empty())
-                .map(str::to_string),
-        );
-        let inner = item[open + 1..].trim_end().trim_end_matches('}');
-        for nested in split_top_level(inner) {
-            expand_use_item(&path, &nested, paths);
-        }
-        return;
-    }
-    if !matches!(item, "self" | "*") {
-        path.extend(item.split("::").map(str::to_string));
-    }
-    paths.push(path);
-}
-
-fn rust_path_reaches(path: &[String], from: &RustLocation, target: &RustLocation) -> bool {
-    let Some(first) = path.first() else {
-        return false;
-    };
-    let same_crate = from.crate_root == target.crate_root;
-    let local = |segments: &[String]| -> Vec<String> {
-        from.module
-            .iter()
-            .map(|segment| segment.to_string())
-            .chain(segments.iter().cloned())
-            .collect()
-    };
-
-    let absolute: Vec<String> = match first.as_str() {
-        "crate" if same_crate => path[1..].to_vec(),
-        "self" if same_crate => local(&path[1..]),
-        "super" if same_crate => {
-            let climbs = path.iter().take_while(|s| *s == "super").count();
-            let Some(kept) = from.module.len().checked_sub(climbs) else {
-                return false;
-            };
-            from.module[..kept]
-                .iter()
-                .map(|segment| segment.to_string())
-                .chain(path[climbs..].iter().cloned())
-                .collect()
-        }
-        "crate" | "self" | "super" => return false,
-        name if target.crate_name.as_deref() == Some(name) => path[1..].to_vec(),
-        _ if same_crate => local(path),
-        _ => return false,
-    };
-
-    // `self::` and bare paths only reach downward, so they can't name the importer or its parents.
-    let is_downward = !matches!(first.as_str(), "crate" | "super")
-        && target.crate_name.as_deref() != Some(first.as_str());
-    if is_downward && target.module.len() <= from.module.len() {
-        return false;
-    }
-
-    // A crate root holds items, not submodules, so a longer path points past it.
-    if target.module.is_empty() {
-        return absolute.len() <= 1;
-    }
-    absolute.len() >= target.module.len()
-        && target
-            .module
-            .iter()
-            .zip(&absolute)
-            .all(|(wanted, segment)| *wanted == segment)
-}
-
-fn resolve_source(importer: &str, lang: &str, source: &str) -> Option<String> {
-    if lang == "python" {
-        let dots = source.chars().take_while(|c| *c == '.').count();
-        let module = source[dots..].replace('.', "/");
-        if dots == 0 {
-            return Some(module);
-        }
-        let climb = "../".repeat(dots - 1);
-        return join_relative(importer, &format!("./{climb}{module}"));
-    }
-    if lang == "rust" {
-        return None;
-    }
-    if source.starts_with('.') {
-        return join_relative(importer, source);
-    }
-    source
-        .strip_prefix("@/")
-        .or_else(|| source.strip_prefix("~/"))
-        .map(str::to_string)
-}
-
-fn join_relative(importer: &str, relative: &str) -> Option<String> {
-    let mut parts: Vec<&str> = importer.split('/').collect();
-    parts.pop();
-    for segment in relative.split('/') {
-        match segment {
-            "" | "." => {}
-            ".." => {
-                parts.pop()?;
-            }
-            other => parts.push(other),
-        }
-    }
-    Some(parts.join("/"))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        RustLocation, declares_module, ends_with_path, module_key, points_at, rust_path_reaches,
-        use_paths,
-    };
-    use crate::model::{Import, ImportNames, Symbol};
+    use super::{View, edit_distance, fit, name_words, path_tier};
 
-    fn imports(importer: &str, lang: &str, source: &str, target_path: &str) -> bool {
-        let import = Import {
-            source: source.to_string(),
-            names: None,
+    #[test]
+    fn output_stops_at_the_cap_and_says_what_was_left_out() {
+        let lines: Vec<String> = (0..100).map(|i| format!("line {i}")).collect();
+        let out = fit(&lines, &View::default(), 50);
+        assert!(out.len() < 150, "{out}");
+        assert!(out.contains("more lines"), "{out}");
+    }
+
+    #[test]
+    fn a_single_long_line_is_still_shown() {
+        let lines = vec!["x".repeat(500)];
+        assert_eq!(fit(&lines, &View::default(), 50).lines().count(), 1);
+    }
+
+    #[test]
+    fn limit_and_all_override_the_cap() {
+        let lines: Vec<String> = (0..100).map(|i| format!("line {i}")).collect();
+        let limited = View {
+            limit: Some(2),
+            ..View::default()
         };
-        points_at(importer, lang, &import, &module_key(target_path))
-    }
-
-    fn import_with_names(source: &str, names: &[&str]) -> Import {
-        Import {
-            source: source.to_string(),
-            names: Some(ImportNames::List(
-                names.iter().map(|name| name.to_string()).collect(),
-            )),
-        }
-    }
-
-    fn rust_imports(importer: &str, source: &str, names: &[&str], target: &str) -> bool {
-        let from = RustLocation::of(importer, "my-repo");
-        let target = RustLocation::of(target, "my-repo");
-        use_paths(&import_with_names(source, names))
-            .iter()
-            .any(|path| rust_path_reaches(path, &from, &target))
-    }
-
-    #[test]
-    fn module_keys_ignore_extension_and_index_files() {
-        assert_eq!(module_key("src/lib/auth.ts"), "src/lib/auth");
-        assert_eq!(module_key("src/lib/auth/index.tsx"), "src/lib/auth");
-        assert_eq!(module_key("pkg/__init__.py"), "pkg");
-        assert_eq!(module_key("src/lib/auth"), "src/lib/auth");
-    }
-
-    #[test]
-    fn suffix_matching_respects_path_boundaries() {
-        assert!(ends_with_path("src/lib/auth", "lib/auth"));
-        assert!(ends_with_path("src/lib/auth", "src/lib/auth"));
-        assert!(!ends_with_path("src/lib/oauth", "auth"));
-        assert!(!ends_with_path("src/lib/auth", ""));
-    }
-
-    #[test]
-    fn relative_imports_resolve_against_the_importer() {
-        let target = "src/lib/auth.ts";
-        assert!(imports(
-            "src/app/page.ts",
-            "typescript",
-            "../lib/auth",
-            target
-        ));
-        assert!(imports("src/lib/x.ts", "typescript", "./auth", target));
-        assert!(imports("src/lib/x.ts", "typescript", "./auth.js", target));
-        assert!(!imports("src/app/page.ts", "typescript", "./auth", target));
-        assert!(!imports("a.ts", "typescript", "../../auth", target));
-    }
-
-    #[test]
-    fn index_files_and_aliases_resolve() {
-        assert!(imports(
-            "src/a.ts",
-            "typescript",
-            "./lib",
-            "src/lib/index.ts"
-        ));
-        assert!(imports(
-            "src/a.ts",
-            "typescript",
-            "@/lib/auth",
-            "src/lib/auth.ts"
-        ));
-        assert!(imports(
-            "src/a.ts",
-            "typescript",
-            "~/lib/auth",
-            "src/lib/auth.ts"
-        ));
-        assert!(!imports(
-            "src/a.ts",
-            "typescript",
-            "next-auth",
-            "src/lib/auth.ts"
-        ));
-    }
-
-    #[test]
-    fn python_modules_resolve() {
-        let target = "src/pkg/mod.py";
-        assert!(imports("src/app.py", "python", "pkg.mod", target));
-        assert!(imports("src/pkg/other.py", "python", ".mod", target));
-        assert!(imports("src/pkg/sub/deep.py", "python", "..mod", target));
-        assert!(!imports("src/app.py", "python", "pkg.other", target));
-    }
-
-    #[test]
-    fn python_modules_named_in_the_import_list_resolve() {
-        let sibling = import_with_names(".", &["mod"]);
-        let target = module_key("src/pkg/mod.py");
-        assert!(points_at("src/pkg/other.py", "python", &sibling, &target));
-        assert!(!points_at("src/app/other.py", "python", &sibling, &target));
-
-        let absolute = import_with_names("pkg", &["mod", "other"]);
-        assert!(points_at("src/app.py", "python", &absolute, &target));
-    }
-
-    #[test]
-    fn rust_crate_paths_resolve() {
-        let target = "src/model.rs";
-        assert!(rust_imports(
-            "src/main.rs",
-            "crate::model",
-            &["Index"],
-            target
-        ));
-        assert!(rust_imports("src/a/b.rs", "crate", &["model"], target));
-        assert!(rust_imports(
-            "src/a.rs",
-            "crate",
-            &["other", "model::{Index, Symbol}"],
-            target
-        ));
-        assert!(!rust_imports("src/a.rs", "crate::modeling", &["X"], target));
-        assert!(!rust_imports(
-            "src/a.rs",
-            "crate::other",
-            &["model"],
-            target
-        ));
-    }
-
-    #[test]
-    fn rust_self_super_and_relative_paths_resolve() {
-        assert!(rust_imports(
-            "src/extract/python.rs",
-            "super",
-            &["Extracted"],
-            "src/extract/mod.rs"
-        ));
-        assert!(rust_imports(
-            "src/a/b/c.rs",
-            "super::super::d",
-            &["X"],
-            "src/a/d.rs"
-        ));
-        assert!(rust_imports(
-            "src/extract/mod.rs",
-            "self::python",
-            &["run"],
-            "src/extract/python.rs"
-        ));
-        assert!(rust_imports(
-            "src/main.rs",
-            "index",
-            &["run"],
-            "src/index.rs"
-        ));
-        assert!(!rust_imports(
-            "src/a.rs",
-            "super::super",
-            &["X"],
-            "src/x.rs"
-        ));
-    }
-
-    #[test]
-    fn rust_external_crates_do_not_match_enclosing_modules() {
-        let parent = "src/extract/mod.rs";
-        let child = "src/extract/python.rs";
-        assert!(!rust_imports(
-            child,
-            "std::collections",
-            &["HashSet"],
-            parent
-        ));
-        assert!(!rust_imports(child, "tree_sitter", &["Node"], parent));
-        assert!(!rust_imports(child, "self::inner", &["X"], parent));
-        assert!(!rust_imports(
-            "src/a.rs",
-            "anyhow",
-            &["Result"],
-            "src/lib.rs"
-        ));
-        assert!(!rust_imports("src/a.rs", "", &["anyhow"], "src/lib.rs"));
-    }
-
-    #[test]
-    fn rust_nested_use_groups_expand() {
-        assert!(rust_imports(
-            "src/a.rs",
-            "crate::x",
-            &["y::{z, w::{v}}"],
-            "src/x/y/w/v.rs"
-        ));
-        assert!(rust_imports(
-            "src/a.rs",
-            "crate::x",
-            &["y::{self}"],
-            "src/x/y.rs"
-        ));
-    }
-
-    #[test]
-    fn rust_paths_cross_workspace_crates_by_name() {
-        let target = "rust/crates/forge-core/src/jsnum.rs";
-        assert!(rust_imports(
-            "rust/crates/forge-data/src/a.rs",
-            "forge_core::jsnum",
-            &["js_round"],
-            target
-        ));
-        assert!(rust_imports(
-            "rust/crates/forge-core/tests/jsnum.rs",
-            "forge_core",
-            &["jsnum"],
-            target
-        ));
-        assert!(!rust_imports(
-            "rust/crates/forge-data/src/a.rs",
-            "crate::jsnum",
-            &["x"],
-            target
-        ));
-        assert!(!rust_imports(
-            "rust/crates/forge-data/src/a.rs",
-            "other_crate::jsnum",
-            &["x"],
-            target
-        ));
-    }
-
-    #[test]
-    fn rust_crate_roots_are_not_matched_by_every_path() {
-        assert!(rust_imports("src/a.rs", "crate", &["Item"], "src/lib.rs"));
-        assert!(!rust_imports(
-            "src/a.rs",
-            "crate::model",
-            &["Index"],
-            "src/lib.rs"
-        ));
-    }
-
-    #[test]
-    fn rust_mod_declarations_count_but_inline_modules_do_not() {
-        let module = |name: &str, end_line: u32| Symbol {
-            name: name.to_string(),
-            kind: "module".to_string(),
-            line: 1,
-            end_line: Some(end_line),
-            exported: false,
-            is_async: false,
-            parent: None,
-            decorators: None,
+        assert_eq!(fit(&lines, &limited, 50).lines().count(), 3);
+        let everything = View {
+            all: true,
+            ..View::default()
         };
-        let main = RustLocation::of("src/main.rs", "repo");
-        let target = RustLocation::of("src/lookup.rs", "repo");
-        assert!(declares_module(&module("lookup", 1), &main, &target));
-        assert!(!declares_module(&module("lookup", 9), &main, &target));
-        assert!(!declares_module(&module("other", 1), &main, &target));
+        assert_eq!(fit(&lines, &everything, 50).lines().count(), 100);
+    }
 
-        let sibling = RustLocation::of("src/a.rs", "repo");
-        assert!(!declares_module(&module("lookup", 1), &sibling, &target));
+    #[test]
+    fn scope_matches_whole_path_segments() {
+        let view = View {
+            within: Some("src/app/".to_string()),
+            ..View::default()
+        };
+        assert!(view.includes("src/app/page.ts"));
+        assert!(!view.includes("src/application/page.ts"));
+    }
+
+    #[test]
+    fn tiers_put_source_before_tests_before_noise() {
+        assert_eq!(path_tier("src/lib/auth.ts"), 0);
+        assert_eq!(path_tier("src/lib/auth.test.ts"), 1);
+        assert_eq!(path_tier("tests/auth.rs"), 1);
+        assert_eq!(path_tier("pkg/test_auth.py"), 1);
+        assert_eq!(path_tier("supabase/migrations/001_init.sql"), 2);
+        assert_eq!(path_tier("tests/fixtures/auth.ts"), 2);
+        assert_eq!(path_tier("src/types.d.ts"), 2);
+        assert_eq!(path_tier("src/latest/contest.ts"), 0);
+    }
+
+    #[test]
+    fn names_split_into_words() {
+        assert_eq!(name_words("enforceRateLimit"), ["enforce", "rate", "limit"]);
+        assert_eq!(name_words("rate_limit_v2"), ["rate", "limit", "v2"]);
+        assert_eq!(name_words("HTTPServer"), ["httpserver"]);
+    }
+
+    #[test]
+    fn edit_distance_counts_changes() {
+        assert_eq!(edit_distance("kitten", "sitting"), 3);
+        assert_eq!(edit_distance("same", "same"), 0);
     }
 }

@@ -1,6 +1,6 @@
 ---
 name: drift
-description: Find where functions, classes, types, tables and tests are defined, see what a file contains, and trace who imports a module, using the Drift index instead of grepping. Use before searching for code in a repo that has a .drift-index.json file.
+description: Find where code is defined, read one function, see a file's contents, and trace uses and imports with far fewer tokens than grepping or reading whole files. Use before searching or exploring code.
 paths:
   - "**/*.ts"
   - "**/*.tsx"
@@ -15,24 +15,26 @@ paths:
   - "**/*.sql"
 ---
 
-# Drift: index-first code navigation
+# Drift: find code, read less
 
-`.drift-index.json` maps every symbol to its file and line range, and records each file's imports and test cases. Run these commands from the repo root before grepping or reading whole files.
+Run these before grepping or reading whole files. The index builds and refreshes itself.
 
-| To | Run | You get |
-|----|-----|---------|
-| Find a definition | `drift query <symbol>` | Kind, `file:start-end`, export status. Exact names first, then substrings |
-| See what a file contains | `drift outline <file>` | Its symbols with line ranges, and its imports |
-| Find tests | `drift tests <text>` | Matching tests by path, suite or case name, with line numbers |
-| List all test files | `drift tests` | Each file's framework and test count |
-| See who imports a module | `drift importers <path or text>` | Importing files. A path like `src/lib/auth.ts` resolves relative imports and `@/` aliases |
+| To | Run |
+|----|-----|
+| Find a definition | `drift query <symbol>` |
+| Search by words | `drift find rate limit` |
+| Read one definition | `drift show <symbol>` (or `path:name`, `Parent.name`) |
+| See how to call it | `drift sig <symbol>` |
+| See what a file contains | `drift outline <file>` |
+| Find uses | `drift refs <symbol>` |
+| Find importers | `drift importers <file>` |
+| Find tests | `drift tests <text>` or `drift tests --for <file>` |
+| Prepare to change something | `drift context <symbol or file>` |
+| Get oriented | `drift map` |
+| Review a branch | `drift changes [ref]` |
 
-Then read only the line range you need.
+Output is capped. Narrow it with `--in <path>`, or use `--limit <n>` or `--all`.
 
-Do not read or grep `.drift-index.json` itself. It can be hundreds of kilobytes, and with `--compact` it is one line, so either returns all of it.
+Never read `.drift-index.json`. It's large, and with `--compact` it's one line.
 
-## When to use Grep or Read instead
-
-- The index is missing, or older than your recent changes (`drift stats` shows when it was generated). Run `drift index . --compact` to refresh it.
-- You need the implementation, not the location.
-- You are searching for string literals, comments or call sites. The index records definitions and imports, not usages.
+Grep is still right for strings and comments. `drift refs` matches by name, so its hits can include other things with the same name.

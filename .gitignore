@@ -1,2 +1,3 @@
 /target/
 .drift-index.json
+/.bench-corpus/

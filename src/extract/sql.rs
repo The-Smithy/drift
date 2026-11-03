@@ -50,16 +50,24 @@ pub fn extract(source: &str) -> Extracted {
                 continue;
             }
             let start = captures.get(0).map_or(0, |m| m.start());
-            let line = masked[..start].bytes().filter(|&b| b == b'\n').count() as u32 + 1;
+            let line = line_at(&masked, start);
+            let end = statement_end(&masked, start);
+            let signature = masked[start..end]
+                .lines()
+                .next()
+                .map(|first| first.trim().trim_end_matches(['(', ' ']).to_string())
+                .filter(|first| !first.is_empty());
             symbols.push(Symbol {
                 name: clean_name(raw),
                 kind: kind.to_string(),
                 line,
-                end_line: None,
+                end_line: Some(line_at(&masked, end.saturating_sub(1))),
                 exported: true,
                 is_async: false,
                 parent: None,
                 decorators: None,
+                signature,
+                doc: None,
             });
         }
     }
@@ -72,6 +80,60 @@ pub fn extract(source: &str) -> Extracted {
         imports: Vec::new(),
         tests: None,
     }
+}
+
+fn line_at(text: &str, offset: usize) -> u32 {
+    text[..offset].bytes().filter(|&b| b == b'\n').count() as u32 + 1
+}
+
+// One past the statement's `;`, skipping any inside quotes or a `$tag$ ... $tag$` function body.
+fn statement_end(masked: &str, start: usize) -> usize {
+    let bytes = masked.as_bytes();
+    let mut i = start;
+    while i < bytes.len() {
+        match bytes[i] {
+            b';' => return i + 1,
+            b'\'' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'\'' {
+                    i += 1;
+                }
+            }
+            b'$' => {
+                let tag_end = bytes[i + 1..]
+                    .iter()
+                    .position(|&b| !(b.is_ascii_alphanumeric() || b == b'_'))
+                    .map(|length| i + 1 + length);
+                if let Some(tag_end) = tag_end
+                    && bytes[tag_end] == b'$'
+                {
+                    let tag = &masked[i..=tag_end];
+                    if let Some(close) = masked[tag_end + 1..].find(tag) {
+                        i = tag_end + 1 + close + tag.len();
+                        continue;
+                    }
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    bytes.len()
+}
+
+pub fn reference_lines(source: &str, name: &str) -> Vec<u32> {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let mut lines: Vec<u32> = Vec::new();
+    for (number, line) in mask_comments(source).lines().enumerate() {
+        let found = line.match_indices(name).any(|(at, _)| {
+            !line[..at].chars().next_back().is_some_and(is_word)
+                && !line[at + name.len()..].chars().next().is_some_and(is_word)
+        });
+        if found {
+            lines.push(number as u32 + 1);
+        }
+    }
+    lines
 }
 
 fn clean_name(raw: &str) -> String {
@@ -201,6 +263,32 @@ mod tests {
              CREATE TABLE kept (id int);\n",
         );
         assert_eq!(found, vec![entry("kept", "table", 5)]);
+    }
+
+    #[test]
+    fn statements_end_at_their_semicolon_and_skip_function_bodies() {
+        let source = [
+            "CREATE TABLE a (",
+            "  id int",
+            ");",
+            "CREATE FUNCTION f() RETURNS int AS $body$",
+            "BEGIN",
+            "  x := 1;",
+            "END;",
+            "$body$ LANGUAGE sql;",
+            "",
+        ]
+        .join("\n");
+        let symbols = extract("sql", &source).unwrap().symbols;
+        assert_eq!((symbols[0].line, symbols[0].end_line), (1, Some(3)));
+        assert_eq!(symbols[0].signature.as_deref(), Some("CREATE TABLE a"));
+        assert_eq!((symbols[1].line, symbols[1].end_line), (4, Some(8)));
+    }
+
+    #[test]
+    fn references_match_whole_words_outside_comments() {
+        let source = "-- users here\nSELECT * FROM users;\nSELECT * FROM users_old;\n";
+        assert_eq!(super::reference_lines(source, "users"), vec![2]);
     }
 
     #[test]

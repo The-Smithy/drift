@@ -102,7 +102,7 @@ fn full_index_keeps_nulls_and_reports_real_test_counts() {
     );
 
     let index = fixture.index_json();
-    assert_eq!(index["version"], "1.1");
+    assert_eq!(index["version"], "1.2");
     assert_eq!(index["tests"]["a.test.ts"]["framework"], "jest");
 
     let helper = &index["files"]["a.test.ts"]["symbols"][0];
@@ -320,7 +320,7 @@ fn tests_summarize_and_filter() {
         summary.contains("tests/auth.test.ts  unknown  3 tests"),
         "{summary}"
     );
-    assert!(summary.contains("3 tests across 1 files"), "{summary}");
+    assert!(summary.contains("3 tests across 1 file"), "{summary}");
 
     let by_case = stdout(&fixture.drift(&["tests", "TOKEN"]));
     assert!(by_case.contains("login"), "{by_case}");
@@ -397,6 +397,543 @@ fn importers_resolve_rust_and_python_modules() {
 
     let python = stdout(&fixture.drift(&["importers", "pkg/mod_b.py"]));
     assert!(python.contains("pkg/mod_a.py  .: mod_b"), "{python}");
+}
+
+fn feature_fixture(name: &str) -> Fixture {
+    let fixture = Fixture::new(name);
+    fixture.write(".git/HEAD", "ref: refs/heads/master\n");
+    fixture.write(
+        "src/auth.ts",
+        "/** Checks a session token. */\n\
+         export function verifyToken(token: string): boolean {\n  return token.length > 0;\n}\n\n\
+         export class SessionStore {\n  load(id: string): string {\n    return verifyToken(id) ? id : '';\n  }\n}\n\n\
+         function hiddenHelper() {}\n",
+    );
+    fixture.write(
+        "src/app.ts",
+        "import { verifyToken } from './auth';\n\
+         // verifyToken in a comment\n\
+         const note = 'verifyToken in a string';\n\
+         export function handleRequest(token: string) {\n  return verifyToken(token);\n}\n",
+    );
+    fixture.write(
+        "tests/auth.test.ts",
+        "import { verifyToken } from '../src/auth';\n\
+         test('accepts a token', () => {\n  verifyToken('x');\n});\n",
+    );
+    fixture.write(
+        "supabase/migrations/001_a.sql",
+        "CREATE FUNCTION verifyToken() RETURNS int AS $$ SELECT 1; $$ LANGUAGE sql;\n",
+    );
+    fixture.write(
+        "supabase/migrations/002_b.sql",
+        "CREATE FUNCTION verifyToken() RETURNS int AS $$ SELECT 2; $$ LANGUAGE sql;\n",
+    );
+    fixture
+}
+
+#[test]
+fn lookups_build_the_index_on_first_use_and_refresh_when_stale() {
+    let fixture = feature_fixture("freshness");
+    assert!(!fixture.root.join(".drift-index.json").exists());
+
+    let first = stdout(&fixture.drift(&["query", "verifyToken"]));
+    assert!(first.contains("src/auth.ts:2-4"), "{first}");
+    assert!(fixture.root.join(".drift-index.json").exists());
+    let exclude = fs::read_to_string(fixture.root.join(".git/info/exclude")).unwrap_or_default();
+    assert!(exclude.is_empty() || exclude.contains(".drift-index.json"));
+
+    // A new definition, a moved line and a deleted file must all show up with no reindex.
+    fixture.write("src/new.ts", "export function brandNew() {}\n");
+    assert!(stdout(&fixture.drift(&["query", "brandNew"])).contains("src/new.ts:1"));
+    fixture.write("src/new.ts", "\n\nexport function brandNew() {}\n");
+    assert!(stdout(&fixture.drift(&["query", "brandNew"])).contains("src/new.ts:3"));
+    fs::remove_file(fixture.root.join("src/new.ts")).unwrap();
+    assert_eq!(fixture.drift(&["query", "brandNew"]).status.code(), Some(1));
+}
+
+#[test]
+fn lookups_work_from_a_subfolder() {
+    let fixture = feature_fixture("subfolder");
+    let output = Command::new(env!("CARGO_BIN_EXE_drift"))
+        .args(["query", "verifyToken"])
+        .current_dir(fixture.root.join("src"))
+        .output()
+        .unwrap();
+    assert!(
+        stdout(&output).contains("src/auth.ts:2-4"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn an_explicit_index_is_used_as_is() {
+    let fixture = feature_fixture("explicit");
+    assert!(
+        fixture
+            .drift(&["index", ".", "-o", "saved.json"])
+            .status
+            .success()
+    );
+    fixture.write("src/new.ts", "export function brandNew() {}\n");
+    let output = fixture.drift(&["query", "brandNew", "--index", "saved.json"]);
+    assert_eq!(output.status.code(), Some(1));
+}
+
+#[test]
+fn output_is_capped_and_says_how_to_see_more() {
+    let fixture = Fixture::new("budget");
+    fixture.write(".git/HEAD", "ref: refs/heads/master\n");
+    let many: String = (0..2000)
+        .map(|i| format!("export function handler{i}() {{}}\n"))
+        .collect();
+    fixture.write("src/a.ts", &many);
+
+    let capped = stdout(&fixture.drift(&["query", "handler"]));
+    assert!(capped.len() < 4200, "{}", capped.len());
+    assert!(capped.contains("more lines"), "{capped}");
+
+    let limited = stdout(&fixture.drift(&["query", "handler", "--limit", "3"]));
+    assert_eq!(limited.lines().count(), 4);
+
+    let everything = stdout(&fixture.drift(&["query", "handler", "--all"]));
+    assert_eq!(everything.lines().count(), 2000);
+}
+
+#[test]
+fn a_closed_pipe_is_not_a_crash() {
+    use std::process::Stdio;
+    let fixture = Fixture::new("pipe");
+    fixture.write(".git/HEAD", "ref: refs/heads/master\n");
+    let many: String = (0..20000)
+        .map(|i| format!("export function handler{i}() {{}}\n"))
+        .collect();
+    fixture.write("src/a.ts", &many);
+    assert!(fixture.drift(&["index"]).status.success());
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_drift"))
+        .args(["query", "handler", "--all"])
+        .current_dir(&fixture.root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
+fn results_rank_source_first_and_newest_migration_before_older() {
+    let fixture = feature_fixture("ranking");
+    let output = stdout(&fixture.drift(&["query", "verifyToken"]));
+    let lines: Vec<&str> = output.lines().collect();
+    assert!(lines[0].contains("src/auth.ts"), "{output}");
+    assert!(lines[1].contains("002_b.sql"), "{output}");
+    assert!(lines[2].contains("001_a.sql"), "{output}");
+
+    let scoped = stdout(&fixture.drift(&["query", "verifyToken", "--in", "supabase"]));
+    assert!(!scoped.contains("src/auth.ts"), "{scoped}");
+}
+
+#[test]
+fn query_takes_several_names_and_suggests_on_a_miss() {
+    let fixture = feature_fixture("multi");
+    let output = fixture.drift(&["query", "handleRequest", "verifyTokn"]);
+    assert!(output.status.success());
+    let text = stdout(&output);
+    assert!(text.contains("handleRequest:"), "{text}");
+    assert!(text.contains("src/app.ts:4-6"), "{text}");
+
+    let miss = fixture.drift(&["query", "verifyTokn"]);
+    assert_eq!(miss.status.code(), Some(1));
+    let text = stdout(&miss);
+    assert!(text.contains("Did you mean: verifyToken?"), "{text}");
+}
+
+#[test]
+fn show_prints_only_the_definition() {
+    let fixture = feature_fixture("show");
+    let output = stdout(&fixture.drift(&["show", "src/auth.ts:verifyToken"]));
+    assert!(output.contains("return token.length > 0;"), "{output}");
+    assert!(!output.contains("SessionStore"), "{output}");
+
+    let method = stdout(&fixture.drift(&["show", "SessionStore.load"]));
+    assert!(method.contains("load(id: string)"), "{method}");
+    assert!(!method.contains("export function"), "{method}");
+
+    let several = stdout(&fixture.drift(&["show", "verifyToken"]));
+    assert!(several.contains("return token.length > 0;"), "{several}");
+    assert!(several.contains("Also defined at"), "{several}");
+
+    assert_eq!(fixture.drift(&["show", "nope"]).status.code(), Some(1));
+}
+
+#[test]
+fn sig_prints_the_signature_and_doc_without_the_body() {
+    let fixture = feature_fixture("sig");
+    let output = stdout(&fixture.drift(&["sig", "src/auth.ts:verifyToken"]));
+    assert!(
+        output.contains("function verifyToken(token: string): boolean"),
+        "{output}"
+    );
+    assert!(output.contains("Checks a session token."), "{output}");
+    assert!(!output.contains("token.length"), "{output}");
+}
+
+#[test]
+fn refs_find_uses_by_enclosing_definition_and_skip_noise() {
+    let fixture = feature_fixture("refs");
+    let output = stdout(&fixture.drift(&["refs", "verifyToken"]));
+    assert!(output.contains("src/app.ts"), "{output}");
+    assert!(
+        output.contains("5 handleRequest: return verifyToken(token);"),
+        "{output}"
+    );
+    assert!(output.contains("8 load: "), "{output}");
+    assert!(!output.contains("in a comment"), "{output}");
+    assert!(!output.contains("in a string"), "{output}");
+    assert!(!output.contains("import {"), "{output}");
+    assert!(
+        output.find("src/app.ts").unwrap() < output.find("tests/auth.test.ts").unwrap(),
+        "{output}"
+    );
+
+    let unused = fixture.drift(&["refs", "hiddenHelper"]);
+    assert_eq!(unused.status.code(), Some(1));
+    assert!(stdout(&unused).contains("No references"));
+}
+
+#[test]
+fn find_matches_words_in_any_order() {
+    let fixture = feature_fixture("find");
+    let output = stdout(&fixture.drift(&["find", "token", "verify"]));
+    assert!(
+        output.lines().next().unwrap().contains("verifyToken"),
+        "{output}"
+    );
+    let by_doc = stdout(&fixture.drift(&["find", "session", "token"]));
+    assert!(by_doc.contains("verifyToken"), "{by_doc}");
+    assert_eq!(
+        fixture.drift(&["find", "nothing", "here"]).status.code(),
+        Some(1)
+    );
+}
+
+#[test]
+fn tests_for_finds_tests_through_imports_and_names() {
+    let fixture = feature_fixture("tests-for");
+    let output = stdout(&fixture.drift(&["tests", "--for", "src/auth.ts"]));
+    assert!(output.contains("tests/auth.test.ts"), "{output}");
+    assert_eq!(
+        fixture
+            .drift(&["tests", "--for", "src/app.ts"])
+            .status
+            .code(),
+        Some(1)
+    );
+}
+
+#[test]
+fn context_bundles_what_is_needed_before_a_change() {
+    let fixture = feature_fixture("context");
+    let symbol = stdout(&fixture.drift(&["context", "verifyToken"]));
+    assert!(
+        symbol.contains("function verifyToken(token: string): boolean"),
+        "{symbol}"
+    );
+    assert!(symbol.contains("Used in"), "{symbol}");
+    assert!(symbol.contains("src/app.ts:5 handleRequest"), "{symbol}");
+    assert!(symbol.contains("Imported by"), "{symbol}");
+    assert!(symbol.contains("tests/auth.test.ts"), "{symbol}");
+
+    let file = stdout(&fixture.drift(&["context", "src/auth.ts"]));
+    assert!(file.contains("src/auth.ts  typescript"), "{file}");
+    assert!(file.contains("class SessionStore"), "{file}");
+    assert!(!file.contains("hiddenHelper"), "{file}");
+}
+
+#[test]
+fn outline_can_show_signatures() {
+    let fixture = feature_fixture("outline-sig");
+    let output = stdout(&fixture.drift(&["outline", "src/auth.ts", "--sig"]));
+    assert!(
+        output.contains("function verifyToken(token: string): boolean  2-4"),
+        "{output}"
+    );
+}
+
+#[test]
+fn map_summarizes_the_repo() {
+    let fixture = feature_fixture("map");
+    let output = stdout(&fixture.drift(&["map"]));
+    assert!(output.contains("Languages: "), "{output}");
+    assert!(output.contains("Most imported:"), "{output}");
+    assert!(
+        output.contains("src/auth.ts  2 importers: verifyToken, SessionStore"),
+        "{output}"
+    );
+    assert!(output.contains("Tests: 1 file"), "{output}");
+}
+
+fn git(fixture: &Fixture, args: &[&str]) {
+    let output = Command::new("git")
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "core.autocrlf=false",
+        ])
+        .args(args)
+        .current_dir(&fixture.root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn changes_map_a_diff_to_definitions() {
+    let fixture = Fixture::new("changes");
+    git(&fixture, &["init", "-q"]);
+    fixture.write(
+        "a.ts",
+        "export function first() {\n  return 1;\n}\n\nexport function second() {\n  return 2;\n}\n",
+    );
+    fixture.write("gone.ts", "export const g = 1;\n");
+    git(&fixture, &["add", "."]);
+    git(&fixture, &["commit", "-qm", "start"]);
+
+    assert!(stdout(&fixture.drift(&["changes"])).contains("No changes"));
+
+    fixture.write(
+        "a.ts",
+        "export function first() {\n  return 1;\n}\n\nexport function second() {\n  return 3;\n}\n",
+    );
+    fs::remove_file(fixture.root.join("gone.ts")).unwrap();
+    fixture.write("fresh.ts", "export const f = 1;\n");
+
+    let output = stdout(&fixture.drift(&["changes"]));
+    assert!(
+        output.contains("function second  5-7 (exported)"),
+        "{output}"
+    );
+    assert!(!output.contains("function first"), "{output}");
+    assert!(output.contains("gone.ts  deleted"), "{output}");
+    assert!(output.contains("fresh.ts  new, untracked"), "{output}");
+
+    assert!(
+        !fixture
+            .drift(&["changes", "--", "--output=x"])
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn bench_is_repeatable_and_reports_savings() {
+    let fixture = feature_fixture("bench");
+    let padding: String = (0..300).map(|i| format!("// padding line {i}\n")).collect();
+    fixture.write(
+        "src/large.ts",
+        &format!("{padding}export function bigOne() {{\n  return 1;\n}}\nexport const a = 1;\nexport const b = 2;\n"),
+    );
+
+    let first = fixture.drift(&["bench", ".", "--json"]);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let second = fixture.drift(&["bench", ".", "--json"]);
+    assert_eq!(stdout(&first), stdout(&second));
+
+    let report: Value = serde_json::from_str(&stdout(&first)).unwrap();
+    assert!(
+        report["total"]["saved_percent"].as_f64().unwrap() > 0.0,
+        "{report}"
+    );
+    let tasks: Vec<&str> = report["kinds"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|kind| kind["task"].as_str().unwrap())
+        .collect();
+    for expected in [
+        "find a definition",
+        "read one function",
+        "understand a file",
+        "find uses",
+    ] {
+        assert!(tasks.contains(&expected), "{tasks:?}");
+    }
+
+    fixture.write("before.json", &stdout(&first));
+    let compared = stdout(&fixture.drift(&["bench", ".", "--compare", "before.json"]));
+    assert!(compared.contains("vs before"), "{compared}");
+
+    assert!(
+        fixture
+            .drift(&["bench", ".", "--check", "1"])
+            .status
+            .success()
+    );
+    assert_eq!(
+        fixture
+            .drift(&["bench", ".", "--check", "100"])
+            .status
+            .code(),
+        Some(1)
+    );
+}
+
+fn run_hook(fixture: &Fixture, event: Value) -> String {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_drift"))
+        .arg("hook")
+        .current_dir(&fixture.root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(event.to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    stdout(&output)
+}
+
+#[test]
+fn hook_adds_notes_without_blocking_and_fails_open() {
+    let fixture = feature_fixture("hook");
+    assert!(fixture.drift(&["index", ".", "--compact"]).status.success());
+    let cwd = fixture.root.to_string_lossy().into_owned();
+
+    let note = run_hook(
+        &fixture,
+        serde_json::json!({ "tool_name": "Bash", "cwd": cwd, "tool_input": { "command": "grep -rn verifyToken src" } }),
+    );
+    let parsed: Value = serde_json::from_str(&note).unwrap();
+    assert_eq!(parsed["hookSpecificOutput"]["hookEventName"], "PreToolUse");
+    let context = parsed["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap();
+    assert!(context.contains("src/auth.ts:2"), "{context}");
+    assert!(
+        parsed["hookSpecificOutput"]
+            .get("permissionDecision")
+            .is_none()
+    );
+
+    for quiet in [
+        serde_json::json!({ "tool_name": "Bash", "cwd": cwd, "tool_input": { "command": "cargo test | grep failed" } }),
+        serde_json::json!({ "tool_name": "Grep", "cwd": cwd, "tool_input": { "pattern": "unknownName" } }),
+        serde_json::json!({ "tool_name": "Edit", "cwd": cwd, "tool_input": {} }),
+        serde_json::json!({ "not": "an event" }),
+    ] {
+        assert_eq!(run_hook(&fixture, quiet), "");
+    }
+
+    let padding = "x".repeat(10_000);
+    fixture.write("src/big.ts", &format!("export const big = '{padding}';\n"));
+    assert!(fixture.drift(&["index", ".", "--compact"]).status.success());
+    let big = fixture
+        .root
+        .join("src/big.ts")
+        .to_string_lossy()
+        .into_owned();
+    let read = run_hook(
+        &fixture,
+        serde_json::json!({ "tool_name": "Read", "cwd": cwd, "tool_input": { "file_path": big } }),
+    );
+    assert!(read.contains("drift outline src/big.ts"), "{read}");
+    let ranged = run_hook(
+        &fixture,
+        serde_json::json!({ "tool_name": "Read", "cwd": cwd, "tool_input": { "file_path": big, "limit": 5 } }),
+    );
+    assert_eq!(ranged, "");
+}
+
+#[test]
+fn hook_install_merges_settings_and_is_idempotent() {
+    let fixture = Fixture::new("hook-install");
+    fixture.write(
+        ".claude/settings.json",
+        "{\n  \"theme\": \"dark\",\n  \"hooks\": { \"PreToolUse\": [{ \"matcher\": \"Edit\", \"hooks\": [] }] }\n}\n",
+    );
+    assert!(fixture.drift(&["install", ".", "--hook"]).status.success());
+    assert!(fixture.drift(&["install", ".", "--hook"]).status.success());
+
+    let settings = read_json(&fixture.root.join(".claude/settings.json"));
+    assert_eq!(settings["theme"], "dark");
+    let entries = settings["hooks"]["PreToolUse"].as_array().unwrap();
+    assert_eq!(entries.len(), 4);
+    assert_eq!(entries[0]["matcher"], "Edit");
+    let matchers: Vec<&str> = entries[1..]
+        .iter()
+        .map(|entry| entry["matcher"].as_str().unwrap())
+        .collect();
+    assert_eq!(matchers, ["Bash", "Grep", "Read"]);
+
+    let broken = Fixture::new("hook-broken");
+    broken.write(".claude/settings.json", "{ not json");
+    assert!(!broken.drift(&["install", ".", "--hook"]).status.success());
+    assert_eq!(
+        fs::read_to_string(broken.root.join(".claude/settings.json")).unwrap(),
+        "{ not json"
+    );
+}
+
+#[test]
+fn instructions_install_updates_in_place() {
+    let fixture = Fixture::new("instructions");
+    fixture.write("CLAUDE.md", "# Project\n\nKeep this.\n");
+    assert!(
+        fixture
+            .drift(&["install", ".", "--instructions"])
+            .status
+            .success()
+    );
+    assert!(
+        fixture
+            .drift(&["install", ".", "--instructions"])
+            .status
+            .success()
+    );
+
+    let text = fs::read_to_string(fixture.root.join("CLAUDE.md")).unwrap();
+    assert!(text.starts_with("# Project\n\nKeep this.\n"), "{text}");
+    assert_eq!(text.matches("drift:start").count(), 1, "{text}");
+    assert!(text.contains("drift query"), "{text}");
+
+    assert!(
+        fixture
+            .drift(&["install", ".", "--instructions", "--file", "SITE.md"])
+            .status
+            .success()
+    );
+    assert!(fixture.root.join("SITE.md").exists());
+
+    let gitignore = fs::read_to_string(fixture.root.join(".gitignore")).unwrap();
+    assert_eq!(gitignore.matches(".drift-index.json").count(), 1);
+}
+
+#[test]
+fn instructions_stay_small_because_they_cost_tokens_every_session() {
+    assert!(include_str!("../src/skill.md").len() <= 1800);
+    assert!(include_str!("../src/instructions.md").len() <= 900);
 }
 
 #[test]
