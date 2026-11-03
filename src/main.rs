@@ -197,11 +197,11 @@ enum Command {
         /// Compact output
         #[arg(long)]
         compact: bool,
-        /// Also install the Claude Code skill in each repo
+        /// Also install the skills in each repo
         #[arg(long)]
         install: bool,
     },
-    /// Install the Claude Code skill into a repo, and optionally more
+    /// Set up a repo so coding agents use Drift
     Install {
         /// Path to repo root
         #[arg(default_value = ".")]
@@ -209,12 +209,15 @@ enum Command {
         /// Also add a Claude Code hook that points agents to Drift
         #[arg(long)]
         hook: bool,
-        /// Also add agent instructions to CLAUDE.md or AGENTS.md
+        /// Also add instructions to AGENTS.md, and to CLAUDE.md and GEMINI.md if the repo has them
         #[arg(long)]
         instructions: bool,
         /// Put the instructions in this file instead
         #[arg(long, value_name = "FILE", requires = "instructions")]
         file: Option<PathBuf>,
+        /// Also set up these tools before the repo uses them: kiro, junie, continue, aider or all
+        #[arg(long, value_name = "TOOL", value_delimiter = ',')]
+        agent: Vec<String>,
     },
     /// Used by the Claude Code hook; reads an event on stdin
     #[command(hide = true)]
@@ -357,7 +360,8 @@ fn main() -> Result<()> {
             hook,
             instructions,
             file,
-        } => cmd_install(&path, hook, instructions, file.as_deref()),
+            agent,
+        } => cmd_install(&path, hook, instructions, file.as_deref(), &agent),
         Command::Hook => {
             install::hook();
             Ok(())
@@ -365,16 +369,28 @@ fn main() -> Result<()> {
     }
 }
 
-fn cmd_install(path: &Path, hook: bool, instructions: bool, file: Option<&Path>) -> Result<()> {
+fn cmd_install(
+    path: &Path,
+    hook: bool,
+    instructions: bool,
+    file: Option<&Path>,
+    agents: &[String],
+) -> Result<()> {
     let root = resolve_root(path)?;
-    println!("Skill: {}", install::install_skill(&root)?.display());
+    for skill in install::install_skills(&root)? {
+        println!("Skill: {}", skill.display());
+    }
     if install::ignore_index(&root)? {
         println!("Added {INDEX_FILE} to .gitignore");
     }
+    for line in install::install_tools(&root, agents)? {
+        println!("{line}");
+    }
     if instructions {
-        let target = install::instructions_target(&root, file);
-        install::install_instructions(&target)?;
-        println!("Instructions: {}", target.display());
+        for target in install::instructions_targets(&root, file) {
+            install::install_instructions(&target)?;
+            println!("Instructions: {}", target.display());
+        }
     }
     if hook {
         println!("Hook: {}", install::install_hook(&root)?.display());
@@ -509,7 +525,7 @@ fn index_one(repo: &Path, compact: bool, install: bool) -> Result<(Index, PathBu
     write_index(&index, &output, compact)?;
     let elapsed = start.elapsed().as_secs_f64();
     if install && !index.files.is_empty() {
-        install::install_skill(repo)?;
+        install::install_skills(repo)?;
     }
     Ok((index, output, elapsed))
 }

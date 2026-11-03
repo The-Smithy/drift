@@ -931,6 +931,142 @@ fn instructions_install_updates_in_place() {
 }
 
 #[test]
+fn install_writes_a_skill_for_every_tool_that_reads_skills() {
+    let fixture = Fixture::new("install-portable");
+    assert!(fixture.drift(&["install"]).status.success());
+
+    let claude = fs::read_to_string(fixture.root.join(".claude/skills/drift/SKILL.md")).unwrap();
+    assert!(claude.contains("paths:"), "{claude}");
+
+    let shared = fs::read_to_string(fixture.root.join(".agents/skills/drift/SKILL.md")).unwrap();
+    assert!(shared.contains("name: drift"), "{shared}");
+    assert!(shared.contains("description: "), "{shared}");
+    assert!(!shared.contains("paths:"), "{shared}");
+
+    // Nothing for tools this repo doesn't use.
+    for absent in [
+        ".kiro",
+        ".junie",
+        ".continue",
+        "CONVENTIONS.md",
+        "AGENTS.md",
+    ] {
+        assert!(!fixture.root.join(absent).exists(), "{absent}");
+    }
+}
+
+#[test]
+fn install_sets_up_tools_the_repo_already_uses() {
+    let fixture = Fixture::new("install-detect");
+    fixture.write(".kiro/settings.json", "{}");
+    fixture.write(".continue/config.yaml", "name: x\n");
+    assert!(fixture.drift(&["install"]).status.success());
+
+    assert!(fixture.root.join(".kiro/skills/drift/SKILL.md").exists());
+    let rule = fs::read_to_string(fixture.root.join(".continue/rules/drift.md")).unwrap();
+    assert!(
+        rule.starts_with("---\nname: Drift\nalwaysApply: true\n---\n"),
+        "{rule}"
+    );
+    assert!(rule.contains("drift query"), "{rule}");
+    assert!(!fixture.root.join(".junie").exists());
+    assert!(!fixture.root.join("CONVENTIONS.md").exists());
+}
+
+#[test]
+fn install_agent_flag_sets_up_named_tools() {
+    let fixture = Fixture::new("install-agent");
+    let output = fixture.drift(&["install", ".", "--agent", "junie,cursor"]);
+    assert!(output.status.success());
+    assert!(stdout(&output).contains("cursor: covered by the shared files"));
+    assert!(fixture.root.join(".junie/skills/drift/SKILL.md").exists());
+    assert!(!fixture.root.join(".kiro").exists());
+    assert!(!fixture.root.join(".cursor").exists());
+
+    let all = Fixture::new("install-agent-all");
+    assert!(
+        all.drift(&["install", ".", "--agent", "all"])
+            .status
+            .success()
+    );
+    for expected in [
+        ".kiro/skills/drift/SKILL.md",
+        ".junie/skills/drift/SKILL.md",
+        ".continue/rules/drift.md",
+        "CONVENTIONS.md",
+        ".aider.conf.yml",
+    ] {
+        assert!(all.root.join(expected).exists(), "{expected}");
+    }
+
+    let unknown = fixture.drift(&["install", ".", "--agent", "nonsense"]);
+    assert!(!unknown.status.success());
+    assert!(String::from_utf8_lossy(&unknown.stderr).contains("Known tools"));
+}
+
+#[test]
+fn aider_config_is_added_to_but_never_rewritten() {
+    let fresh = Fixture::new("aider-fresh");
+    fresh.write(".aider.conf.yml", "model: x");
+    assert!(fresh.drift(&["install"]).status.success());
+    assert!(fresh.drift(&["install"]).status.success());
+    let text = fs::read_to_string(fresh.root.join(".aider.conf.yml")).unwrap();
+    assert_eq!(text, "model: x\nread: CONVENTIONS.md\n");
+
+    let existing = Fixture::new("aider-existing");
+    existing.write(".aider.conf.yml", "read: [NOTES.md]\n");
+    let output = stdout(&existing.drift(&["install"]));
+    assert!(output.contains("add CONVENTIONS.md to `read:`"), "{output}");
+    assert_eq!(
+        fs::read_to_string(existing.root.join(".aider.conf.yml")).unwrap(),
+        "read: [NOTES.md]\n"
+    );
+}
+
+#[test]
+fn instructions_reach_agents_md_and_each_tools_own_file() {
+    let fixture = Fixture::new("instructions-targets");
+    assert!(
+        fixture
+            .drift(&["install", ".", "--instructions"])
+            .status
+            .success()
+    );
+    assert!(fixture.root.join("AGENTS.md").exists());
+    assert!(!fixture.root.join("CLAUDE.md").exists());
+    assert!(!fixture.root.join("GEMINI.md").exists());
+
+    fixture.write("CLAUDE.md", "# Claude\n");
+    fixture.write("GEMINI.md", "# Gemini\n");
+    assert!(
+        fixture
+            .drift(&["install", ".", "--instructions"])
+            .status
+            .success()
+    );
+    for file in ["AGENTS.md", "CLAUDE.md", "GEMINI.md"] {
+        let text = fs::read_to_string(fixture.root.join(file)).unwrap();
+        assert_eq!(text.matches("drift:start").count(), 1, "{file}");
+    }
+
+    let only_one = Fixture::new("instructions-file");
+    only_one.write("CLAUDE.md", "# Claude\n");
+    assert!(
+        only_one
+            .drift(&["install", ".", "--instructions", "--file", "SITE.md"])
+            .status
+            .success()
+    );
+    assert!(only_one.root.join("SITE.md").exists());
+    assert!(!only_one.root.join("AGENTS.md").exists());
+    assert!(
+        !fs::read_to_string(only_one.root.join("CLAUDE.md"))
+            .unwrap()
+            .contains("drift:start")
+    );
+}
+
+#[test]
 fn instructions_stay_small_because_they_cost_tokens_every_session() {
     assert!(include_str!("../src/skill.md").len() <= 1800);
     assert!(include_str!("../src/instructions.md").len() <= 900);

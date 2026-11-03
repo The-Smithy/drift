@@ -102,6 +102,10 @@ cargo test
 
 Note the change in binary size in your PR. Each grammar adds to it.
 
+## Supporting another agent tool
+
+Prefer the shared locations, `AGENTS.md` and `.agents/skills/`, because a new file per tool clutters every repo. If a tool can't read those, add it to `TOOLS_NEEDING_SETUP` in `src/install.rs`, link its documentation in your PR, and update the table in `README.md`.
+
 ## Changing the index format
 
 The format is defined in `src/model.rs`. Prefer adding optional fields, and bump `SCHEMA_VERSION` in that file for any change. Old indexes need to keep loading, or Drift has to rebuild them.

@@ -92,7 +92,8 @@ A feature saves nothing if agents don't use it.
 | Item | What it does | Estimate |
 |------|--------------|----------|
 | **`drift install --hook`** | An optional Claude Code hook that points an agent to Drift when it greps for a name the index already knows. | 300K–600K |
-| **`drift install --instructions`** | Adds the agent instructions to the right file for a repo, so nobody has to write them by hand. | 100K–200K |
+| **`drift install --instructions`** | Adds the agent instructions to `AGENTS.md`, and to `CLAUDE.md` and `GEMINI.md` if the repo has them, so nobody has to write them by hand. | 100K–200K |
+| **Every coding agent** | `drift install` writes the shared `.agents/skills` folder as well as Claude Code's, and sets up Kiro, Junie, Continue and Aider when the repo uses them. | Done with the above |
 | **Smaller instructions** | Instructions cost tokens in every session. Freshness and ranking will let us shorten them, with a limit enforced in CI. | 50K–100K |
 
 ## Decided against

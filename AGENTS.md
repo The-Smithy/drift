@@ -240,26 +240,29 @@ Schema-qualified SQL names keep their schema, such as `public.users`. To find on
 
 ## Integration examples
 
+### Any coding agent
+
+```bash
+drift install . --instructions
+```
+
+- The skill goes in `.claude/skills/drift/` and `.agents/skills/drift/`. Most tools read one of these and load the skill only when it's relevant, which costs the fewest tokens.
+- The instructions go in `AGENTS.md`, and also in `CLAUDE.md` and `GEMINI.md` if the repo has them. Running it again updates the section rather than adding another. Use `--file SITE.md` to put it in one other file instead.
+- The index is added to `.gitignore`.
+
+Kiro, Junie, Continue and Aider get their own files when the repo already uses them. Add `--agent kiro`, or `--agent all`, to set them up anyway. See the [README](README.md#for-agents) for which tool reads what.
+
 ### Claude Code
 
 ```bash
-drift install .
+drift install . --hook
 ```
 
-This writes the skill to `.claude/skills/drift/SKILL.md` and adds the index to `.gitignore`. Claude Code loads the skill when working on supported file types.
+`--hook` adds a Claude Code hook to `.claude/settings.json`. When an agent searches for a name the index knows, or reads a whole file over 8 KB, the hook adds a short note pointing to Drift. It never blocks a tool, and if anything goes wrong it stays silent. It needs `drift` on the `PATH`.
 
-To add instructions that load in every session, and an optional hook:
+### Anything else
 
-```bash
-drift install . --instructions --hook
-```
-
-- `--instructions` adds a short section to `CLAUDE.md`, or to `AGENTS.md` if there's no `CLAUDE.md`. Choose another file with `--file SITE.md`. Running it again updates the section rather than adding another.
-- `--hook` adds a Claude Code hook to `.claude/settings.json`. When an agent searches for a name the index knows, or reads a whole file over 8 KB, the hook adds a short note pointing to Drift. It never blocks a tool, and if anything goes wrong it stays silent. It needs `drift` on the `PATH`.
-
-### Other agents
-
-`drift install . --instructions` works for any agent that reads `AGENTS.md`, as long as the repo has no `CLAUDE.md`. Otherwise, add this to your agent's instructions:
+Add this to your agent's instructions:
 
 ```
 Before grepping or reading whole files, use Drift:

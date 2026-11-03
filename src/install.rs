@@ -21,12 +21,150 @@ const HOOK_TOOLS: &[&str] = &["Bash", "Grep", "Read"];
 // Reads smaller than this are cheap enough that a note would cost more than it saves.
 const LARGE_READ_BYTES: u64 = 8 * 1024;
 
-pub fn install_skill(root: &Path) -> Result<PathBuf> {
-    let directory = root.join(".claude").join("skills").join("drift");
+// Tools with no shared location to read from, and what shows the repo already uses them.
+const TOOLS_NEEDING_SETUP: &[(&str, &str)] = &[
+    ("kiro", ".kiro"),
+    ("junie", ".junie"),
+    ("continue", ".continue"),
+    ("aider", ".aider.conf.yml"),
+];
+
+// These read AGENTS.md or a shared skills folder, so `drift install` already covers them.
+const TOOLS_ALREADY_COVERED: &[&str] = &[
+    "amp",
+    "antigravity",
+    "claude",
+    "cline",
+    "codex",
+    "copilot",
+    "cursor",
+    "droid",
+    "gemini",
+    "opencode",
+    "windsurf",
+    "zed",
+];
+
+// `paths` is Claude Code's own field. It isn't in the Agent Skills standard the other tools follow.
+fn portable_skill() -> String {
+    let mut in_paths = false;
+    let mut lines = Vec::new();
+    for line in SKILL.lines() {
+        if line.starts_with("paths:") {
+            in_paths = true;
+            continue;
+        }
+        if in_paths && line.starts_with("  - ") {
+            continue;
+        }
+        in_paths = false;
+        lines.push(line);
+    }
+    lines.join("\n") + "\n"
+}
+
+fn write_skill(directory: PathBuf, content: &str) -> Result<PathBuf> {
     fs::create_dir_all(&directory)?;
     let skill = directory.join("SKILL.md");
-    fs::write(&skill, SKILL)?;
+    fs::write(&skill, content)?;
     Ok(skill)
+}
+
+pub fn install_skills(root: &Path) -> Result<Vec<PathBuf>> {
+    Ok(vec![
+        write_skill(root.join(".claude").join("skills").join("drift"), SKILL)?,
+        write_skill(
+            root.join(".agents").join("skills").join("drift"),
+            &portable_skill(),
+        )?,
+    ])
+}
+
+fn install_aider(root: &Path) -> Result<Vec<String>> {
+    let conventions = root.join("CONVENTIONS.md");
+    install_instructions(&conventions)?;
+    let mut lines = vec![format!("aider: {}", conventions.display())];
+
+    let config = root.join(".aider.conf.yml");
+    let mut text = fs::read_to_string(&config).unwrap_or_default();
+    if text.contains("CONVENTIONS.md") {
+        return Ok(lines);
+    }
+    if text.lines().any(|line| line.starts_with("read:")) {
+        // Changing an existing list safely would need a YAML parser, so this one is left to you.
+        lines.push("aider: add CONVENTIONS.md to `read:` in .aider.conf.yml".to_string());
+        return Ok(lines);
+    }
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str("read: CONVENTIONS.md\n");
+    fs::write(&config, text)?;
+    lines.push(format!("aider: {}", config.display()));
+    Ok(lines)
+}
+
+fn install_tool(root: &Path, tool: &str) -> Result<Vec<String>> {
+    match tool {
+        "kiro" => {
+            let skill = write_skill(
+                root.join(".kiro").join("skills").join("drift"),
+                &portable_skill(),
+            )?;
+            Ok(vec![format!("kiro: {}", skill.display())])
+        }
+        "junie" => {
+            let skill = write_skill(
+                root.join(".junie").join("skills").join("drift"),
+                &portable_skill(),
+            )?;
+            Ok(vec![format!("junie: {}", skill.display())])
+        }
+        "continue" => {
+            let directory = root.join(".continue").join("rules");
+            fs::create_dir_all(&directory)?;
+            let rule = directory.join("drift.md");
+            fs::write(
+                &rule,
+                format!("---\nname: Drift\nalwaysApply: true\n---\n\n{INSTRUCTIONS}"),
+            )?;
+            Ok(vec![format!("continue: {}", rule.display())])
+        }
+        "aider" => install_aider(root),
+        _ => bail!("no setup for {tool}"),
+    }
+}
+
+// Sets up the tools the repo already uses, plus any asked for by name.
+pub fn install_tools(root: &Path, requested: &[String]) -> Result<Vec<String>> {
+    let mut lines = Vec::new();
+    let mut wanted: Vec<&str> = Vec::new();
+    for name in requested {
+        let name = name.to_lowercase();
+        if name == "all" {
+            wanted.extend(TOOLS_NEEDING_SETUP.iter().map(|(tool, _)| *tool));
+        } else if let Some((tool, _)) = TOOLS_NEEDING_SETUP.iter().find(|(tool, _)| *tool == name) {
+            wanted.push(tool);
+        } else if TOOLS_ALREADY_COVERED.contains(&name.as_str()) {
+            lines.push(format!("{name}: covered by the shared files"));
+        } else {
+            let known: Vec<&str> = TOOLS_NEEDING_SETUP
+                .iter()
+                .map(|(tool, _)| *tool)
+                .chain(TOOLS_ALREADY_COVERED.iter().copied())
+                .collect();
+            bail!(
+                "Unknown tool '{name}'. Known tools: all, {}",
+                known.join(", ")
+            );
+        }
+    }
+    for (tool, marker) in TOOLS_NEEDING_SETUP {
+        if wanted.contains(tool) || root.join(marker).exists() {
+            lines.extend(install_tool(root, tool)?);
+        }
+    }
+    Ok(lines)
 }
 
 pub fn ignore_index(root: &Path) -> Result<bool> {
@@ -44,15 +182,20 @@ pub fn ignore_index(root: &Path) -> Result<bool> {
     Ok(true)
 }
 
-pub fn instructions_target(root: &Path, file: Option<&Path>) -> PathBuf {
+// AGENTS.md reaches most tools. Claude Code and Gemini CLI read their own files instead, so those
+// get the same section when the repo has them.
+pub fn instructions_targets(root: &Path, file: Option<&Path>) -> Vec<PathBuf> {
     if let Some(file) = file {
-        return root.join(file);
+        return vec![root.join(file)];
     }
-    ["CLAUDE.md", "AGENTS.md"]
-        .iter()
-        .map(|name| root.join(name))
-        .find(|path| path.exists())
-        .unwrap_or_else(|| root.join("AGENTS.md"))
+    let mut targets = vec![root.join("AGENTS.md")];
+    targets.extend(
+        ["CLAUDE.md", "GEMINI.md"]
+            .iter()
+            .map(|name| root.join(name))
+            .filter(|path| path.exists()),
+    );
+    targets
 }
 
 pub fn install_instructions(target: &Path) -> Result<()> {
@@ -265,7 +408,18 @@ pub fn hook() {
 mod tests {
     use serde_json::json;
 
-    use super::searched_name;
+    use super::{SKILL, portable_skill, searched_name};
+
+    #[test]
+    fn the_portable_skill_drops_only_the_claude_specific_field() {
+        assert!(SKILL.contains("paths:"));
+        let portable = portable_skill();
+        assert!(!portable.contains("paths:"));
+        assert!(!portable.contains("**/*.ts"));
+        assert!(portable.starts_with("---\nname: drift\ndescription: "));
+        assert!(portable.contains("---\n\n# Drift"));
+        assert!(portable.contains("drift query <symbol>"));
+    }
 
     fn bash(command: &str) -> Option<String> {
         searched_name("Bash", &json!({ "command": command }))

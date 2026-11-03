@@ -122,7 +122,7 @@ drift context src/lib/auth.ts     # Get what you need before changing it
 drift install . --instructions
 ```
 
-This adds the Claude Code skill, a short section in `CLAUDE.md` or `AGENTS.md`, and a `.gitignore` entry for the index.
+This adds a skill that agents load when they need it, a short section in `AGENTS.md`, and a `.gitignore` entry for the index. It works with Claude Code, Codex, Cursor, Copilot and [many other tools](#for-agents).
 
 ## Commands
 
@@ -144,7 +144,7 @@ This adds the Claude Code skill, a short section in `CLAUDE.md` or `AGENTS.md`, 
 | `drift index [path]` | Build the index yourself. Lookups normally do this on their own |
 | `drift stats` | Show index statistics |
 | `drift batch <parent>` | Index every git repo directly under a directory |
-| `drift install [path]` | Install the Claude Code skill and ignore the index in a repo |
+| `drift install [path]` | Set up a repo so coding agents use Drift. See [For Agents](#for-agents) |
 
 ### Options
 
@@ -155,7 +155,8 @@ This adds the Claude Code skill, a short section in `CLAUDE.md` or `AGENTS.md`, 
 | `--ignore-dirs` | `index` | Extra directory names to skip |
 | `--ignore-files` | `index` | Extra file names to skip |
 | `--install` | `batch` | Also install the Claude Code skill in each repo |
-| `--instructions` | `install` | Also add agent instructions to `CLAUDE.md` or `AGENTS.md`. `--file` picks another file |
+| `--instructions` | `install` | Also add a section to `AGENTS.md`, and to `CLAUDE.md` and `GEMINI.md` if the repo has them. `--file` picks one file instead |
+| `--agent <tool>` | `install` | Also set up `kiro`, `junie`, `continue`, `aider` or `all`, before the repo uses them |
 | `--hook` | `install` | Also add a Claude Code hook that points agents to Drift. It never blocks a tool |
 | `--in <path>` | Lookups | Only look in this folder |
 | `--limit <n>` | Lookups | Show at most this many lines, replacing the default size cap |
@@ -261,9 +262,33 @@ See [AGENTS.md](AGENTS.md) for detailed integration instructions.
 
 **The short version:** use Drift's lookups before grepping, then read only the lines you need. Don't read the index file itself. A large repo's index runs to hundreds of kilobytes, and with `--compact` it is a single line.
 
-### Claude Code
+### Setting up a repo
 
-Run `drift install . --instructions` in any repo. Add `--hook` if you also want a note when an agent greps for a name the index knows or reads a large file.
+```bash
+drift install . --instructions
+```
+
+This writes files that nearly every coding agent already reads:
+
+| Tool | Skill, loaded when needed | Instructions, loaded every session |
+|------|---------------------------|------------------------------------|
+| Claude Code | `.claude/skills/` | `CLAUDE.md`, if the repo has one |
+| Codex, Cursor, Copilot, Windsurf, Amp, Antigravity, OpenCode, Factory Droid | `.agents/skills/` | `AGENTS.md` |
+| Zed | `.agents/skills/` | `AGENTS.md`, unless a `.rules`, `.cursorrules` or `CLAUDE.md` file takes priority |
+| Cline | `.claude/skills/` | `AGENTS.md` |
+| Gemini CLI | `.agents/skills/` | `GEMINI.md`, if the repo has one |
+| Kiro | `.kiro/skills/` | `AGENTS.md` |
+| JetBrains Junie | `.junie/skills/` | `AGENTS.md` |
+| Continue | None | `.continue/rules/drift.md` |
+| Aider | None | `CONVENTIONS.md`, added to `read:` in `.aider.conf.yml` |
+
+The last four tools get their own files only when the repo already uses them, so a repo doesn't collect files for tools nobody runs. To set one up anyway, add `--agent kiro`, or `--agent all` for all four.
+
+This table comes from each tool's documentation. We haven't run Drift inside every one of these tools, so please open an issue if one doesn't pick it up.
+
+If you only want the skill and not the always-loaded section, leave out `--instructions`. To put the section in a different file, such as one that another tool regenerates around, use `--instructions --file SITE.md`.
+
+Claude Code users can also add `--hook`, for a note when an agent greps for a name the index knows or reads a large file. Hooks are specific to Claude Code.
 
 ### Other AI tools
 
