@@ -27,7 +27,7 @@ What this tells us:
 
 Estimates are in Claude Code tokens, input plus output. What widens each range is the number of CI rounds across three operating systems, how far a tree-sitter grammar differs from what we expect, and checking results against real repos.
 
-**Status:** Phases 0 to 4 and 6 are built, along with Markdown from Phase 5. What's left is the rest of Phase 5, **about 850K–1.7M tokens**.
+**Status:** Phases 0 to 4 and 6 are built, along with most of Phase 5. What's left is PHP and Rust package names, **about 300K–600K tokens**.
 
 ## Phase 0: Measure (built)
 
@@ -72,17 +72,18 @@ The real test is whether direct file search falls on real work, which `drift aud
 | **`drift map`** | A budgeted summary of a repo: main folders, entry points, and the most imported files and symbols. Replaces exploring with `ls` and opening files at the start of a session. | 400K–800K |
 | **`drift changes [ref]`** | Lists the symbols changed since a git ref, mapped from diff lines to their enclosing definitions. Lets an agent review a branch without reading whole files. | 300K–600K |
 
-## Phase 5: Coverage (about 850K–1.7M tokens left)
+## Phase 5: Coverage (about 300K–600K tokens left)
 
 Ordered by what agents actually read, rather than by which languages are popular. Each still has to pass the benchmark.
 
 | Item | Evidence | Estimate |
 |------|----------|----------|
 | **Markdown** (built) | 10% of `Read` output. An outline of headings with line ranges lets an agent read one section of a long doc. | 150K–300K |
-| **GDScript** | 7% of `Read` output, more than Rust and JavaScript combined in this sample. | 200K–400K |
-| **Lua** | 2% of `Read` output, in repos with thousands of Lua files. | 200K–400K |
+| **GDScript** (built) | 7% of `Read` output, more than Rust and JavaScript combined in this sample. | 200K–400K |
+| **Lua** (built) | 2% of `Read` output, in repos with thousands of Lua files. | 200K–400K |
+| **C, C++ and C#** (built) | Large languages with long files, and Unreal projects. These grammars are the main reason the binary grew from about 9 MB to about 19 MB. | 750K–1.5M |
 | **PHP** | The largest uncovered language by file count, though much of that may be vendored code. | 200K–400K |
-| **JSON and YAML keys** | 4% of `Read` output is JSON. An outline of top-level keys avoids reading large config files. | 150K–300K |
+| **JSON and YAML keys** (built) | 4% of `Read` output is JSON. An outline of keys avoids reading large config files. | 150K–300K |
 | **Rust package names** | `drift importers` guesses crate names from folder names, so a renamed package gets a wrong "no importers" answer. Read them from `Cargo.toml`. | 100K–200K |
 
 ## Phase 6: Adoption (built)

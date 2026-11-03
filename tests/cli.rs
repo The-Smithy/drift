@@ -97,13 +97,13 @@ fn full_index_keeps_nulls_and_reports_real_test_counts() {
 
     let output = fixture.drift(&["index"]);
     assert!(
-        stdout(&output).contains("1 files, 1 symbols, 2 tests"),
+        stdout(&output).contains("2 files, 3 symbols, 2 tests"),
         "{}",
         stdout(&output)
     );
 
     let index = fixture.index_json();
-    assert_eq!(index["version"], "1.3");
+    assert_eq!(index["version"], "1.4");
     assert_eq!(index["tests"]["a.test.ts"]["framework"], "jest");
 
     let helper = &index["files"]["a.test.ts"]["symbols"][0];
@@ -1328,4 +1328,176 @@ fn audit_explains_when_there_is_nothing_to_read() {
     let empty = fixture.drift(&["audit", "--dir", "projects"]);
     assert!(!empty.status.success());
     assert!(String::from_utf8_lossy(&empty.stderr).contains("No tool results"));
+}
+
+#[test]
+fn json_and_yaml_keys_can_be_read_and_rank_below_code() {
+    let fixture = Fixture::new("data-files");
+    fixture.write(
+        "config/app.json",
+        "{\n  \"server\": {\n    \"port\": 80\n  },\n  \"name\": \"x\"\n}\n",
+    );
+    fixture.write("deploy.yaml", "services:\n  web:\n    image: nginx\n");
+    fixture.write("src/a.py", "def server():\n    pass\n");
+    assert!(fixture.drift(&["index", "."]).status.success());
+
+    let outline = stdout(&fixture.drift(&["outline", "app.json"]));
+    assert!(outline.contains("key server  2-4"), "{outline}");
+    assert!(outline.contains("key port  3 in server"), "{outline}");
+
+    let section = stdout(&fixture.drift(&["show", "deploy.yaml:web"]));
+    assert!(section.contains("image: nginx"), "{section}");
+
+    let query = stdout(&fixture.drift(&["query", "server"]));
+    assert!(query.find("src/a.py").unwrap() < query.find("config/app.json").unwrap());
+    assert!(stdout(&fixture.drift(&["show", "server"])).contains("def server"));
+}
+
+#[test]
+fn drift_never_indexes_its_own_index() {
+    let fixture = Fixture::new("own-index");
+    fixture.write("a.py", "def only_here():\n    pass\n");
+    assert!(fixture.drift(&["index", "."]).status.success());
+    assert!(fixture.drift(&["index", "."]).status.success());
+    let index = fixture.index_json();
+    assert!(index["files"].get(".drift-index.json").is_none());
+    assert_eq!(index["files"].as_object().unwrap().len(), 1);
+}
+
+#[test]
+fn lua_uses_imports_and_tests_work_end_to_end() {
+    let fixture = Fixture::new("lua");
+    fixture.write(
+        "lua/my/util.lua",
+        "local M = {}\nfunction M.add(a, b)\n  return a + b\nend\nreturn M\n",
+    );
+    fixture.write(
+        "lua/my/init.lua",
+        "local util = require('my.util')\n-- util.add in a comment\nreturn util.add(1, 2)\n",
+    );
+    fixture.write(
+        "tests/util_spec.lua",
+        "local util = require('my.util')\ndescribe('util', function()\n  it('adds', function() end)\nend)\n",
+    );
+    assert!(fixture.drift(&["index", "."]).status.success());
+
+    let refs = stdout(&fixture.drift(&["refs", "add"]));
+    assert!(refs.contains("lua/my/init.lua"), "{refs}");
+    assert!(!refs.contains("in a comment"), "{refs}");
+
+    let importers = stdout(&fixture.drift(&["importers", "lua/my/util.lua"]));
+    assert!(importers.contains("lua/my/init.lua"), "{importers}");
+    assert!(importers.contains("tests/util_spec.lua"), "{importers}");
+
+    let tests = stdout(&fixture.drift(&["tests", "--for", "lua/my/util.lua"]));
+    assert!(
+        tests.contains("tests/util_spec.lua  busted  1 test"),
+        "{tests}"
+    );
+}
+
+#[test]
+fn gdscript_preloads_count_as_imports() {
+    let fixture = Fixture::new("gdscript");
+    fixture.write(
+        "scripts/hero.gd",
+        "class_name Hero\nfunc hit(amount: int) -> void:\n\tpass\n",
+    );
+    fixture.write(
+        "scripts/game.gd",
+        "extends Node\nconst HeroScript = preload(\"res://scripts/hero.gd\")\nfunc start(hero):\n\thero.hit(1)\n",
+    );
+    fixture.write(
+        "test/test_hero.gd",
+        "extends GutTest\nconst H = preload(\"res://scripts/hero.gd\")\nfunc test_hit():\n\tH.new().hit(1)\n",
+    );
+    assert!(fixture.drift(&["index", "."]).status.success());
+
+    let importers = stdout(&fixture.drift(&["importers", "scripts/hero.gd"]));
+    assert!(importers.contains("scripts/game.gd"), "{importers}");
+
+    let refs = stdout(&fixture.drift(&["refs", "hit"]));
+    assert!(refs.contains("scripts/game.gd"), "{refs}");
+
+    let tests = stdout(&fixture.drift(&["tests", "--for", "scripts/hero.gd"]));
+    assert!(tests.contains("test/test_hero.gd  gut  1 test"), "{tests}");
+}
+
+#[test]
+fn c_includes_and_definitions_work_end_to_end() {
+    let fixture = Fixture::new("c-family");
+    fixture.write("include/util/math.h", "int add(int a, int b);\n");
+    fixture.write(
+        "src/math.c",
+        "#include \"util/math.h\"\nint add(int a, int b) {\n  return a + b;\n}\n",
+    );
+    fixture.write(
+        "src/main.c",
+        "#include \"util/math.h\"\nint main(void) {\n  // add in a comment\n  return add(1, 2);\n}\n",
+    );
+    fixture.write("src/other.c", "#include \"other/math2.h\"\n");
+    assert!(fixture.drift(&["index", "."]).status.success());
+
+    // `show` wants the definition, though the header sorts first.
+    let shown = stdout(&fixture.drift(&["show", "add"]));
+    assert!(shown.contains("return a + b;"), "{shown}");
+
+    let importers = stdout(&fixture.drift(&["importers", "include/util/math.h"]));
+    assert!(importers.contains("src/main.c"), "{importers}");
+    assert!(!importers.contains("src/other.c"), "{importers}");
+
+    let refs = stdout(&fixture.drift(&["refs", "add"]));
+    assert!(refs.contains("src/main.c"), "{refs}");
+    assert!(!refs.contains("in a comment"), "{refs}");
+}
+
+#[test]
+fn overloads_and_cpp_names_can_be_picked() {
+    let fixture = Fixture::new("overloads");
+    fixture.write(
+        "src/Calc.cs",
+        "public class Calc {\n  public int Add(int a) {\n    return a;\n  }\n  public int Add(int a, int b) {\n    return a + b;\n  }\n}\n",
+    );
+    fixture.write(
+        "src/w.cpp",
+        "class Widget {\npublic:\n  int size() { return 1; }\n};\n",
+    );
+    assert!(fixture.drift(&["index", "."]).status.success());
+
+    let first = stdout(&fixture.drift(&["show", "Add"]));
+    assert!(first.contains("return a;"), "{first}");
+    assert!(first.contains("Pick one with path:line"), "{first}");
+
+    let second = stdout(&fixture.drift(&["show", "src/Calc.cs:5"]));
+    assert!(second.contains("return a + b;"), "{second}");
+    assert!(!second.contains("return a;"), "{second}");
+
+    let cpp = stdout(&fixture.drift(&["show", "Widget::size"]));
+    assert!(cpp.contains("return 1;"), "{cpp}");
+}
+
+#[test]
+fn csharp_tests_are_found_by_file_name() {
+    let fixture = Fixture::new("csharp");
+    fixture.write(
+        "src/Service.cs",
+        "namespace App;\npublic class Service { public void Run() {} }\n",
+    );
+    fixture.write(
+        "tests/ServiceTests.cs",
+        "using App;\npublic class ServiceTests {\n  [Fact]\n  public void Runs() { new Service().Run(); }\n}\n",
+    );
+    assert!(fixture.drift(&["index", "."]).status.success());
+
+    let tests = stdout(&fixture.drift(&["tests", "--for", "src/Service.cs"]));
+    assert!(
+        tests.contains("tests/ServiceTests.cs  xunit  1 test"),
+        "{tests}"
+    );
+
+    let by_namespace = stdout(&fixture.drift(&["importers", "App"]));
+    assert!(
+        by_namespace.contains("tests/ServiceTests.cs"),
+        "{by_namespace}"
+    );
 }

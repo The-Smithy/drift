@@ -1,3 +1,8 @@
+mod c_family;
+mod csharp;
+mod data;
+mod gdscript;
+mod lua;
 mod markdown;
 mod python;
 mod rust;
@@ -38,6 +43,23 @@ pub fn is_supported(extension: &str) -> bool {
             | "md"
             | "mdx"
             | "markdown"
+            | "json"
+            | "jsonc"
+            | "yaml"
+            | "yml"
+            | "lua"
+            | "gd"
+            | "cs"
+            | "c"
+            | "h"
+            | "cpp"
+            | "cc"
+            | "cxx"
+            | "hpp"
+            | "hh"
+            | "hxx"
+            | "ipp"
+            | "inl"
     )
 }
 
@@ -62,6 +84,14 @@ pub fn extract(extension: &str, source: &str) -> Option<Extracted> {
         "rs" => rust::extract(source),
         "sql" => Some(sql::extract(source)),
         "md" | "mdx" | "markdown" => Some(markdown::extract(source)),
+        "json" | "jsonc" => data::extract_json(source),
+        "yaml" | "yml" => data::extract_yaml(source),
+        "lua" => lua::extract(source),
+        "gd" => gdscript::extract(source),
+        "cs" => csharp::extract(source),
+        "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" | "ipp" | "inl" => {
+            c_family::extract(extension, source)
+        }
         _ => None,
     }
 }
@@ -147,10 +177,12 @@ fn signature_of(node: Node, kind: &str, source: &str) -> Option<String> {
         _ => header_end(node),
     }
     .unwrap_or_else(|| node.end_byte());
-    let normalized = source[node.start_byte()..end]
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    header_text(&source[node.start_byte()..end])
+}
+
+// Whitespace squeezed, and the punctuation that leads into a body removed.
+fn header_text(raw: &str) -> Option<String> {
+    let normalized = raw.split_whitespace().collect::<Vec<_>>().join(" ");
     let mut header = normalized.as_str();
     while let Some(shorter) = ["=>", "{", ":", "=", ";"]
         .iter()
@@ -228,10 +260,12 @@ fn python_docstring(node: Node, source: &str) -> Option<String> {
 }
 
 fn first_comment_line(raw: &str) -> Option<String> {
-    raw.lines()
+    let without_tags = raw.replace("<summary>", "").replace("</summary>", "");
+    without_tags
+        .lines()
         .map(|line| {
             line.trim()
-                .trim_start_matches(['/', '*', '#', '!'])
+                .trim_start_matches(['/', '*', '#', '!', '-'])
                 .trim_end_matches(['*', '/'])
                 .trim()
         })
@@ -247,6 +281,12 @@ pub fn reference_lines(extension: &str, source: &str, name: &str) -> Vec<u32> {
         "js" | "jsx" | "mjs" | "cjs" => tree_sitter_javascript::LANGUAGE.into(),
         "py" => tree_sitter_python::LANGUAGE.into(),
         "rs" => tree_sitter_rust::LANGUAGE.into(),
+        "lua" => tree_sitter_lua::LANGUAGE.into(),
+        "gd" => tree_sitter_gdscript::LANGUAGE.into(),
+        "cs" => tree_sitter_c_sharp::LANGUAGE.into(),
+        "c" | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" | "ipp" | "inl" => {
+            c_family::language_for(extension, source).0
+        }
         "sql" => return sql::reference_lines(source, name),
         _ => return Vec::new(),
     };
@@ -262,6 +302,8 @@ pub fn reference_lines(extension: &str, source: &str, name: &str) -> Vec<u32> {
             | "import_from_statement"
             | "future_import_statement"
             | "use_declaration"
+            | "using_directive"
+            | "preproc_include"
             | "extern_crate_declaration"
             | "export_clause"
             | "comment"
@@ -305,6 +347,21 @@ fn add_import(imports: &mut Vec<Import>, source: &str, names: Option<ImportNames
         (Some(ImportNames::Star(_)), _) | (_, None) => {}
         (slot, names) => *slot = names,
     }
+}
+
+/// Documents and config. They rank below code, and never count as an entry point.
+pub fn is_data_file(file: &str) -> bool {
+    [
+        ".md",
+        ".mdx",
+        ".markdown",
+        ".json",
+        ".jsonc",
+        ".yaml",
+        ".yml",
+    ]
+    .iter()
+    .any(|extension| file.ends_with(extension))
 }
 
 #[cfg(test)]

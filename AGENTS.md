@@ -36,7 +36,7 @@ Every lookup stops at a size cap and ends with a line saying how much was left o
 | `context`, `map` | 6 KB |
 | `show` | 12 KB |
 
-Results come best first: exported source code, then private source code, then tests, then fixtures, generated files, documents and migrations. Newer migrations come before older ones.
+Results come best first: exported source code, then private source code, then tests, then fixtures, generated files, addons, documents, config and migrations. Newer migrations come before older ones.
 
 | Flag | What it does |
 |------|--------------|
@@ -77,7 +77,7 @@ export function verifyToken(token: string): boolean {
 }
 ```
 
-If a name is defined in several places, you get the best match and a list of the others. Choose one with `Parent.name` or `path:name`, which also work with `sig` and `query`.
+If a name is defined in several places, you get the best match and a list of the others. A definition with a body wins over a one-line declaration in a header. Choose one with `Parent.name`, `Parent::name`, `path:name`, or `path:line` for overloads. These also work with `sig` and `query`.
 
 ### Seeing how to call something
 
@@ -106,7 +106,7 @@ Add `--sig` to show signatures instead of names.
 
 The path can be absolute, relative to the repo root, or a trailing part such as `controllers/user.ts`. If a trailing part fits several files, the command lists them and exits with code 1.
 
-This works on Markdown too, and it's the cheapest way into a long document: outline it, then read one section with `drift show docs/guide.md:Install`.
+This works on Markdown, JSON and YAML too, and it's the cheapest way into a long document or config file: outline it, then read one part with `drift show docs/guide.md:Install` or `drift show deploy.yaml:services`.
 
 ### Finding uses
 
@@ -136,6 +136,10 @@ Prefer passing a file path:
 - **JS and TS:** resolves relative imports and `@/` or `~/` aliases, so `src/lib/auth.ts` won't match an import of `./oauth`.
 - **Python:** resolves module paths, including `from . import sibling`.
 - **Rust:** resolves `use` paths through `crate`, `self`, `super` and workspace crates, and also lists `mod` declarations.
+- **Lua:** resolves `require("a.b")` to `a/b.lua` or `a/b/init.lua`.
+- **C and C++:** matches `#include` paths by their trailing path, so a bare `util.h` can match any file with that name.
+- **GDScript:** resolves `res://` and relative paths in `preload`, `load` and `extends`. Scripts that only use a `class_name` have no import to find, so use `drift refs`.
+- **C#:** `using` names a namespace rather than a file, so pass the namespace as text, as in `drift importers App.Core`.
 
 Text that isn't an indexed file matches any import source containing it, as in `drift importers forge_core`.
 
@@ -157,7 +161,7 @@ tests/controllers/user.test.ts  vitest
 
 Text is matched case-insensitively. A match on a file path shows the whole file, a match on a suite name shows the whole suite, and a match on a case name shows just that case.
 
-The framework is one of `vitest`, `jest`, `mocha`, `playwright`, `node-test`, `cypress`, `pytest`, `unittest`, `cargo-test` or `unknown`.
+The framework is one of `vitest`, `jest`, `mocha`, `playwright`, `node-test`, `cypress`, `pytest`, `unittest`, `cargo-test`, `googletest`, `catch2`, `doctest`, `boost-test`, `criterion`, `check`, `unity`, `cmocka`, `xunit`, `nunit`, `mstest`, `gut`, `gdunit4`, `busted`, `luaunit` or `unknown`.
 
 ### Preparing to change something
 
@@ -214,16 +218,19 @@ This lists the definitions touched since a git ref, or since `HEAD` by default, 
 | Kind | Languages | Description |
 |------|-----------|-------------|
 | `function` | All | Functions, methods, and JS or TS consts holding a function |
-| `class` | TS/JS, Python | Class definitions |
-| `interface` | TS | Interface definitions |
-| `type` | TS, Rust, Python, SQL | Type aliases, `CREATE TYPE` |
-| `enum` | TS, Rust | Enum definitions |
-| `const` | TS/JS, Python, Rust, SQL | Constants and variables, Rust statics, Python `ALL_CAPS` names, SQL indexes and policies |
-| `struct` | Rust | Structs and unions |
+| `class` | TS/JS, Python, C++, C#, GDScript | Class definitions, including C# records |
+| `interface` | TS, C# | Interface definitions |
+| `type` | TS, Rust, Python, SQL, C, C++, C# | Type aliases, `CREATE TYPE`, typedefs, C# delegates |
+| `enum` | TS, Rust, C, C++, C#, GDScript | Enum definitions |
+| `const` | TS/JS, Python, Rust, SQL, C, C++, C#, GDScript, Lua | Constants and variables, Rust statics, Python `ALL_CAPS` names, SQL indexes and policies, C and C++ globals, GDScript variables, Lua tables |
+| `struct` | Rust, C, C++, C# | Structs and unions |
 | `trait` | Rust | Trait definitions |
 | `impl` | Rust | Impl blocks, named `Type` or `Trait for Type` |
-| `macro` | Rust | `macro_rules!` definitions |
-| `module` | Rust, TS | Modules and namespaces |
+| `macro` | Rust, C, C++ | `macro_rules!` definitions, `#define` |
+| `module` | Rust, TS, C++, C# | Modules and namespaces |
+| `property` | C# | Properties |
+| `signal` | GDScript | Signals |
+| `key` | JSON, YAML | A key and its value. Never counted as exported |
 | `heading` | Markdown | A heading and the section under it. Never counted as exported |
 | `table` | SQL | `CREATE TABLE` |
 | `view` | SQL | `CREATE VIEW`, including materialized views |
@@ -239,6 +246,10 @@ Schema-qualified SQL names keep their schema, such as `public.users`. To find on
 | TS/JS | It has `export`, is named in `export { }` or `export default`, or is assigned through CommonJS `exports`. Methods count when their class is exported and they aren't `private`, `protected` or `#private` |
 | Python | Its name has no leading underscore, or it is listed in `__all__` when the module defines one. Functions nested in functions never count |
 | Rust | It has any `pub` modifier, including `pub(crate)`. Items in a trait follow the trait. Trait impl methods don't count |
+| C and C++ | It isn't `static` or in an anonymous namespace. Class members follow `public`, `protected` and `private` |
+| C# | Types unless `private`. Members when `public`, `protected` or `internal`. Interface members always |
+| GDScript | Its name has no leading underscore |
+| Lua | It isn't `local`. Functions on a table count, even a local one |
 | SQL | Always |
 
 ## Update notices
