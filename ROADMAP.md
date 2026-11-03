@@ -14,7 +14,7 @@ We measured the text of 31,439 tool results from 104 real Claude Code sessions b
 | `git` | about 5% |
 | Everything else | about 33% |
 
-This is one developer's work, classified by matching commands, so treat these as rough shares. It counts tool output only. It leaves out 4,022 image results, and it doesn't count that earlier output is sent again on each later turn. Phase 0 exists to replace this with a repeatable measurement.
+This is one developer's work, classified by matching commands, so treat these as rough shares. It counts tool output only. It leaves out 4,022 image results, and it doesn't count that earlier output is sent again on each later turn. `drift audit` now repeats this measurement on any machine.
 
 What this tells us:
 
@@ -27,16 +27,16 @@ What this tells us:
 
 Estimates are in Claude Code tokens, input plus output. What widens each range is the number of CI rounds across three operating systems, how far a tree-sitter grammar differs from what we expect, and checking results against real repos.
 
-**Status:** Phases 1 to 4 and 6 are built, along with the benchmark from Phase 0. What's left is `drift audit` and Phase 5, **about 1.2M–2.4M tokens**.
+**Status:** Phases 0 to 4 and 6 are built, along with Markdown from Phase 5. What's left is the rest of Phase 5, **about 850K–1.7M tokens**.
 
-## Phase 0: Measure (`drift audit` remains, about 200K–400K tokens)
+## Phase 0: Measure (built)
 
 Nothing else can be judged without this, so it comes first.
 
 | Item | What it does | Estimate |
 |------|--------------|----------|
 | **Benchmark suite** (built) | `drift bench` generates the same tasks from any repo, such as "find this definition" or "who imports this file", and compares Drift's output against the `grep` and `Read` route. `bench/run.sh` runs it on pinned public repos, and CI runs that on every PR. | 300K–600K |
-| **`drift audit`** (not built) | Reads local Claude Code transcripts and reports token share by tool, and how often agents used Drift or fell back to `grep`. Prints totals only, and never sends anything anywhere. | 200K–400K |
+| **`drift audit`** (built) | Reads local Claude Code transcripts and reports token share by tool, and how often agents used Drift or fell back to `grep`. Prints totals only, and never sends anything anywhere. | 200K–400K |
 
 ## Phase 1: Keep output small and trustworthy (built)
 
@@ -63,7 +63,7 @@ Nothing else can be judged without this, so it comes first.
 | **`drift refs <symbol>`** | Finds call sites, grouped by file and enclosing function, with comments and strings left out. Usages are the main reason agents still need `grep`. | 600K–1.2M |
 | **`drift find <words>`** | Searches names by word in any order, so `rate limit` finds `enforceRateLimit`. Today's substring match misses it. | 200K–400K |
 
-The real test is whether direct file search falls on real work, which needs `drift audit`.
+The real test is whether direct file search falls on real work, which `drift audit` now shows over time.
 
 ## Phase 4: Orientation (built)
 
@@ -72,13 +72,13 @@ The real test is whether direct file search falls on real work, which needs `dri
 | **`drift map`** | A budgeted summary of a repo: main folders, entry points, and the most imported files and symbols. Replaces exploring with `ls` and opening files at the start of a session. | 400K–800K |
 | **`drift changes [ref]`** | Lists the symbols changed since a git ref, mapped from diff lines to their enclosing definitions. Lets an agent review a branch without reading whole files. | 300K–600K |
 
-## Phase 5: Coverage (about 1M–2M tokens)
+## Phase 5: Coverage (about 850K–1.7M tokens left)
 
 Ordered by what agents actually read, rather than by which languages are popular. Each still has to pass the benchmark.
 
 | Item | Evidence | Estimate |
 |------|----------|----------|
-| **Markdown** | 10% of `Read` output. An outline of headings with line ranges lets an agent read one section of a long doc. | 150K–300K |
+| **Markdown** (built) | 10% of `Read` output. An outline of headings with line ranges lets an agent read one section of a long doc. | 150K–300K |
 | **GDScript** | 7% of `Read` output, more than Rust and JavaScript combined in this sample. | 200K–400K |
 | **Lua** | 2% of `Read` output, in repos with thousands of Lua files. | 200K–400K |
 | **PHP** | The largest uncovered language by file count, though much of that may be vendored code. | 200K–400K |
@@ -95,6 +95,9 @@ A feature saves nothing if agents don't use it.
 | **`drift install --instructions`** | Adds the agent instructions to `AGENTS.md`, and to `CLAUDE.md` and `GEMINI.md` if the repo has them, so nobody has to write them by hand. | 100K–200K |
 | **Every coding agent** | `drift install` writes the shared `.agents/skills` folder as well as Claude Code's, and sets up Kiro, Junie, Continue and Aider when the repo uses them. | Done with the above |
 | **Smaller instructions** | Instructions cost tokens in every session. Freshness and ranking will let us shorten them, with a limit enforced in CI. | 50K–100K |
+| **Update notices** | Old versions miss new lookups, so a lookup prints one line when a newer release exists. See the [README](README.md#update-notices). | 150K–300K |
+
+**Next question:** does telling agents to use Drift work? The first `drift audit` found Drift in a tiny share of calls that it could have answered, though most of that history predates the instructions. Re-run it once the instructions have been in place for a while. If the share stays low, the hook should become the default, because instructions alone aren't enough.
 
 ## Decided against
 
@@ -109,5 +112,5 @@ These were considered and rejected, or don't earn their cost yet. New evidence c
 | **Smaller index files** | Agents query the index and don't read it, so its size no longer affects tokens. Only what Drift prints does. |
 | **More import aliases** | Every `tsconfig` we checked with path aliases uses `@`, which is already handled. |
 | **Compressing build and test output** | About 11% of output, but it's a different job from understanding code. Better as a separate tool. |
-| **Hosted service, dashboards or telemetry** | Drift stays a local utility. Nothing leaves the machine. |
+| **Hosted service, dashboards or telemetry** | Drift stays a local utility. The only network use is the update check, which sends nothing about the user or their code and can be turned off. |
 | **Editing or refactoring code** | Drift reads code and helps find it. Agents already have tools for changing it. |

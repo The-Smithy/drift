@@ -1,3 +1,4 @@
+mod markdown;
 mod python;
 mod rust;
 mod sql;
@@ -24,7 +25,19 @@ pub struct Extracted {
 pub fn is_supported(extension: &str) -> bool {
     matches!(
         extension,
-        "ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "mjs" | "cjs" | "py" | "rs" | "sql"
+        "ts" | "tsx"
+            | "mts"
+            | "cts"
+            | "js"
+            | "jsx"
+            | "mjs"
+            | "cjs"
+            | "py"
+            | "rs"
+            | "sql"
+            | "md"
+            | "mdx"
+            | "markdown"
     )
 }
 
@@ -48,6 +61,7 @@ pub fn extract(extension: &str, source: &str) -> Option<Extracted> {
         "py" => python::extract(source),
         "rs" => rust::extract(source),
         "sql" => Some(sql::extract(source)),
+        "md" | "mdx" | "markdown" => Some(markdown::extract(source)),
         _ => None,
     }
 }

@@ -127,6 +127,9 @@ pub fn path_tier(path: &str) -> u8 {
     ];
     if directories.iter().any(|d| LOW.contains(d))
         || file.ends_with(".d.ts")
+        || file.ends_with(".md")
+        || file.ends_with(".mdx")
+        || file.ends_with(".markdown")
         || file.contains(".gen.")
         || file.contains(".generated.")
     {

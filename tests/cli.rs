@@ -26,6 +26,7 @@ impl Fixture {
         Command::new(env!("CARGO_BIN_EXE_drift"))
             .args(args)
             .current_dir(&self.root)
+            .env("DRIFT_NO_UPDATE_CHECK", "1")
             .output()
             .unwrap()
     }
@@ -102,7 +103,7 @@ fn full_index_keeps_nulls_and_reports_real_test_counts() {
     );
 
     let index = fixture.index_json();
-    assert_eq!(index["version"], "1.2");
+    assert_eq!(index["version"], "1.3");
     assert_eq!(index["tests"]["a.test.ts"]["framework"], "jest");
 
     let helper = &index["files"]["a.test.ts"]["symbols"][0];
@@ -458,6 +459,7 @@ fn lookups_work_from_a_subfolder() {
     let output = Command::new(env!("CARGO_BIN_EXE_drift"))
         .args(["query", "verifyToken"])
         .current_dir(fixture.root.join("src"))
+        .env("DRIFT_NO_UPDATE_CHECK", "1")
         .output()
         .unwrap();
     assert!(
@@ -515,6 +517,7 @@ fn a_closed_pipe_is_not_a_crash() {
     let mut child = Command::new(env!("CARGO_BIN_EXE_drift"))
         .args(["query", "handler", "--all"])
         .current_dir(&fixture.root)
+        .env("DRIFT_NO_UPDATE_CHECK", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -1092,4 +1095,237 @@ fn missing_index_fails_with_a_clear_message() {
     let output = fixture.drift(&["query", "x"]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("drift index"));
+}
+
+// The version check, against a local repo so these never touch the network.
+struct UpdateFixture {
+    fixture: Fixture,
+    cache: PathBuf,
+}
+
+impl UpdateFixture {
+    fn new(name: &str, tags: &[&str]) -> Self {
+        let fixture = Fixture::new(name);
+        fixture.write("a.py", "def a():\n    pass\n");
+        assert!(fixture.drift(&["index", "."]).status.success());
+        let cache = fixture.root.join("cache");
+        let remote = fixture.root.join("remote");
+        fs::create_dir_all(&remote).unwrap();
+        let git = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                .args(args)
+                .current_dir(&remote)
+                .output()
+                .unwrap();
+            assert!(status.status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "first"]);
+        for tag in tags {
+            git(&["tag", tag]);
+        }
+        UpdateFixture { fixture, cache }
+    }
+
+    fn run(&self, args: &[&str], enabled: bool) -> Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_drift"));
+        command
+            .args(args)
+            .current_dir(&self.fixture.root)
+            .env_remove("CI")
+            .env_remove("DRIFT_NO_UPDATE_CHECK")
+            .env("DRIFT_CACHE_DIR", &self.cache)
+            .env("DRIFT_UPDATE_REMOTE", self.fixture.root.join("remote"));
+        if !enabled {
+            command.env("DRIFT_NO_UPDATE_CHECK", "1");
+        }
+        command.output().unwrap()
+    }
+
+    fn state_path(&self) -> PathBuf {
+        self.cache.join("update-check.json")
+    }
+
+    fn seed(&self, latest: &str) {
+        fs::create_dir_all(&self.cache).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        fs::write(
+            self.state_path(),
+            format!(r#"{{"latest":"{latest}","checked_at":{now},"notified_at":0}}"#),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+fn notice_goes_to_stderr_once_a_day_and_leaves_stdout_alone() {
+    let f = UpdateFixture::new("update-notice", &[]);
+    f.seed("99.0.0");
+
+    let first = f.run(&["query", "a"], true);
+    assert!(first.status.success(), "{first:?}");
+    let stderr = String::from_utf8_lossy(&first.stderr);
+    assert!(stderr.contains("drift 99.0.0 is available"), "{stderr}");
+    assert_eq!(stderr.trim().lines().count(), 1);
+    assert!(!String::from_utf8_lossy(&first.stdout).contains("available"));
+
+    let second = f.run(&["query", "a"], true);
+    assert!(!String::from_utf8_lossy(&second.stderr).contains("available"));
+}
+
+#[test]
+fn no_notice_when_up_to_date_or_turned_off() {
+    let f = UpdateFixture::new("update-quiet", &[]);
+    f.seed("0.0.1");
+    let older = f.run(&["query", "a"], true);
+    assert!(!String::from_utf8_lossy(&older.stderr).contains("available"));
+
+    f.seed("99.0.0");
+    let off = f.run(&["query", "a"], false);
+    assert!(!String::from_utf8_lossy(&off.stderr).contains("available"));
+}
+
+#[test]
+fn a_lookup_starts_a_background_check_that_finds_the_newest_release() {
+    let f = UpdateFixture::new(
+        "update-background",
+        &["v98.0.0", "v99.0.0", "v100.0.0-rc.1"],
+    );
+    assert!(f.run(&["query", "a"], true).status.success());
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let latest = loop {
+        let state = fs::read_to_string(f.state_path()).unwrap_or_default();
+        if state.contains("99.0.0") {
+            break state;
+        }
+        assert!(std::time::Instant::now() < deadline, "no result: {state}");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    };
+    assert!(!latest.contains("100.0.0"), "{latest}");
+
+    let next = f.run(&["query", "a"], true);
+    assert!(String::from_utf8_lossy(&next.stderr).contains("drift 99.0.0 is available"));
+}
+
+#[test]
+fn update_check_reports_on_request() {
+    let newer = UpdateFixture::new("update-check-newer", &["v99.0.0"]);
+    let output = newer.run(&["update-check"], true);
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("drift 99.0.0 is available"));
+
+    let none = UpdateFixture::new("update-check-none", &[]);
+    let output = none.run(&["update-check"], true);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("no releases"));
+
+    let same = UpdateFixture::new("update-check-same", &["v0.0.1"]);
+    let output = same.run(&["update-check"], true);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("up to date"));
+}
+
+fn transcript_record(kind: &str, content: Value) -> String {
+    let now = humantime_now();
+    serde_json::json!({"type": kind, "timestamp": now, "message": {"content": content}}).to_string()
+}
+
+fn humantime_now() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    // A date far enough ahead to count as recent; the audit only compares these as text.
+    format!("9999-01-01T00:00:{:02}Z", seconds % 60)
+}
+
+fn transcript_call(id: &str, name: &str, input: Value, output: &str) -> String {
+    [
+        transcript_record(
+            "assistant",
+            serde_json::json!([{"type": "tool_use", "id": id, "name": name, "input": input}]),
+        ),
+        transcript_record(
+            "user",
+            serde_json::json!([{"type": "tool_result", "tool_use_id": id, "content": output}]),
+        ),
+    ]
+    .join("\n")
+}
+
+#[test]
+fn audit_reports_totals_without_file_names_or_contents() {
+    let fixture = Fixture::new("audit");
+    let secret = "SECRET_CONTENT";
+    let body = format!("{secret}{}", "x".repeat(3986));
+    let lines = [
+        transcript_call(
+            "1",
+            "Read",
+            serde_json::json!({"file_path": "src/private_name.ts"}),
+            &body,
+        ),
+        transcript_call(
+            "2",
+            "Grep",
+            serde_json::json!({"pattern": "verifyToken"}),
+            &body,
+        ),
+        transcript_call(
+            "3",
+            "Bash",
+            serde_json::json!({"command": "drift query verifyToken"}),
+            "function verifyToken  src/a.ts:1-2",
+        ),
+        // A resumed session repeats call 1, which must not count twice.
+        transcript_call(
+            "1",
+            "Read",
+            serde_json::json!({"file_path": "src/private_name.ts"}),
+            &body,
+        ),
+        "not json".to_string(),
+    ]
+    .join("\n");
+    fixture.write("projects/my-project/session.jsonl", &lines);
+    fixture.write("projects/other-project/session.jsonl", &lines);
+
+    let output = stdout(&fixture.drift(&["audit", "--dir", "projects"]));
+    assert!(output.contains("3 tool results"), "{output}");
+    assert!(output.contains("Reading files"), "{output}");
+    assert!(
+        output.contains("Drift handled 33% of these calls."),
+        "{output}"
+    );
+    assert!(!output.contains(secret) && !output.contains("private_name"));
+
+    let json = stdout(&fixture.drift(&["audit", "--dir", "projects", "--json"]));
+    let parsed: Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed["finding_code"]["drift_lookups"]["calls"], 1);
+    assert_eq!(parsed["finding_code"]["name_searches"]["calls"], 1);
+    assert_eq!(parsed["finding_code"]["whole_file_reads"]["calls"], 1);
+    assert_eq!(parsed["finding_code"]["whole_file_reads"]["tokens"], 1000);
+
+    fixture.write(
+        "projects/third/session.jsonl",
+        &transcript_call("9", "Glob", serde_json::json!({"pattern": "*"}), "a"),
+    );
+    let only = stdout(&fixture.drift(&["audit", "--dir", "projects", "--project", "THIRD"]));
+    assert!(only.contains("1 tool result,"), "{only}");
+}
+
+#[test]
+fn audit_explains_when_there_is_nothing_to_read() {
+    let fixture = Fixture::new("audit-empty");
+    let missing = fixture.drift(&["audit", "--dir", "nowhere"]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("--dir"));
+
+    fixture.write("projects/a/session.jsonl", "");
+    let empty = fixture.drift(&["audit", "--dir", "projects"]);
+    assert!(!empty.status.success());
+    assert!(String::from_utf8_lossy(&empty.stderr).contains("No tool results"));
 }

@@ -36,7 +36,7 @@ Every lookup stops at a size cap and ends with a line saying how much was left o
 | `context`, `map` | 6 KB |
 | `show` | 12 KB |
 
-Results come best first: exported source code, then private source code, then tests, then fixtures, generated files and migrations. Newer migrations come before older ones.
+Results come best first: exported source code, then private source code, then tests, then fixtures, generated files, documents and migrations. Newer migrations come before older ones.
 
 | Flag | What it does |
 |------|--------------|
@@ -105,6 +105,8 @@ Imports:
 Add `--sig` to show signatures instead of names.
 
 The path can be absolute, relative to the repo root, or a trailing part such as `controllers/user.ts`. If a trailing part fits several files, the command lists them and exits with code 1.
+
+This works on Markdown too, and it's the cheapest way into a long document: outline it, then read one section with `drift show docs/guide.md:Install`.
 
 ### Finding uses
 
@@ -222,6 +224,7 @@ This lists the definitions touched since a git ref, or since `HEAD` by default, 
 | `impl` | Rust | Impl blocks, named `Type` or `Trait for Type` |
 | `macro` | Rust | `macro_rules!` definitions |
 | `module` | Rust, TS | Modules and namespaces |
+| `heading` | Markdown | A heading and the section under it. Never counted as exported |
 | `table` | SQL | `CREATE TABLE` |
 | `view` | SQL | `CREATE VIEW`, including materialized views |
 | `procedure` | SQL | `CREATE PROCEDURE` |
@@ -237,6 +240,10 @@ Schema-qualified SQL names keep their schema, such as `public.users`. To find on
 | Python | Its name has no leading underscore, or it is listed in `__all__` when the module defines one. Functions nested in functions never count |
 | Rust | It has any `pub` modifier, including `pub(crate)`. Items in a trait follow the trait. Trait impl methods don't count |
 | SQL | Always |
+
+## Update notices
+
+A lookup may print one line to stderr saying a newer release of Drift is available. It appears at most once a day and doesn't affect the answer on stdout. Mention it to the user and carry on. Don't update Drift unless they ask.
 
 ## Integration examples
 
