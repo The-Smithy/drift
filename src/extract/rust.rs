@@ -136,10 +136,15 @@ impl<'a> Visitor<'a> {
             "mod_item" => self.visit_mod(node, scope, attributes, exported),
             "macro_invocation" => self.scan_macro_tests(node, scope),
             "expression_statement" | "ERROR" => self.visit_items(node, scope),
-            "use_declaration" if !scope.in_test_module => {
+            "use_declaration" => {
                 if let Some(argument) = node.child_by_field_name("argument") {
                     let (path, names) = parse_use(text(argument, self.source));
-                    add_import(&mut self.imports, &path, names);
+                    // In a test module `super` is just this file, so it is not a dependency.
+                    let refers_to_this_file =
+                        scope.in_test_module && (path == "super" || path.starts_with("super::"));
+                    if !refers_to_this_file {
+                        add_import(&mut self.imports, &path, names);
+                    }
                 }
             }
             _ => {}
@@ -298,7 +303,7 @@ fn parse_use(raw: &str) -> (String, Option<ImportNames>) {
     }
 }
 
-fn split_top_level(list: &str) -> Vec<String> {
+pub fn split_top_level(list: &str) -> Vec<String> {
     let mut items = Vec::new();
     let mut depth = 0;
     let mut start = 0;
@@ -434,6 +439,23 @@ mod tests {
         assert_eq!(names("glob"), Some(ImportNames::star()));
         assert_eq!(names("anyhow"), None);
         assert_eq!(names("std::fmt"), list(&["Debug"]));
+    }
+
+    #[test]
+    fn test_modules_record_real_dependencies_only() {
+        let source = [
+            "#[cfg(test)]",
+            "mod tests {",
+            "    use super::*;",
+            "    use super::helper::Thing;",
+            "    use crate::fixtures::Sample;",
+            "}",
+            "",
+        ]
+        .join("\n");
+        let r = rs(&source);
+        let sources: Vec<_> = r.imports.iter().map(|i| i.source.as_str()).collect();
+        assert_eq!(sources, vec!["crate::fixtures"]);
     }
 
     #[test]

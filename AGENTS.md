@@ -88,7 +88,9 @@ $ drift importers src/lib/auth.ts
   src/app/login.ts  @/lib/auth: signIn, signOut
 ```
 
-Prefer passing a file path. For JS and TS it resolves relative imports and `@/` or `~/` aliases, so `src/lib/auth.ts` won't match an import of `./oauth`. For Python it resolves module paths. Other aliases and Rust paths are not resolved, so search those by text, such as `drift importers forge_core`. Text matches any import source containing it, case-insensitively.
+Prefer passing a file path. For JS and TS it resolves relative imports and `@/` or `~/` aliases, so `src/lib/auth.ts` won't match an import of `./oauth`. For Python it resolves module paths, including `from . import sibling`. For Rust it resolves `use` paths through `crate`, `self`, `super` and workspace crates, and also lists `mod` declarations. Text that isn't an indexed file matches any import source containing it, case-insensitively, such as `drift importers forge_core`.
+
+A file with no results may still be used. Other JS and TS aliases aren't resolved, and Rust crate names are inferred from the crate's directory, so a package renamed in `Cargo.toml` won't match. Rust code that calls `crate::model::load()` with no `use` isn't an import, so grep for that when it matters.
 
 Each line shows the importing file, the import source, and the imported names. `*` means a wildcard or namespace import, and no names means a bare import, `require()` or dynamic `import()`. Re-exports such as `export { a } from './b'` count as imports.
 

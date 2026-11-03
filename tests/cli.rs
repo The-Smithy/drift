@@ -368,6 +368,38 @@ fn importers_resolve_paths_and_match_text() {
 }
 
 #[test]
+fn importers_resolve_rust_and_python_modules() {
+    let fixture = Fixture::new("importers-rust");
+    fixture.write("src/main.rs", "mod model;\nmod other;\nuse std::fmt;\n");
+    fixture.write("src/model.rs", "pub struct Index;\n");
+    fixture.write(
+        "src/other.rs",
+        "use crate::model::Index;\n#[cfg(test)]\nmod tests {\n    use super::*;\n}\n",
+    );
+    fixture.write("src/unrelated.rs", "use std::collections::HashMap;\n");
+    fixture.write("pkg/mod_a.py", "from . import mod_b\n");
+    fixture.write("pkg/mod_b.py", "VALUE = 1\n");
+    assert!(fixture.drift(&["index", ".", "--compact"]).status.success());
+
+    let output = stdout(&fixture.drift(&["importers", "src/model.rs"]));
+    assert!(output.contains("src/main.rs  mod model"), "{output}");
+    assert!(
+        output.contains("src/other.rs  crate::model: Index"),
+        "{output}"
+    );
+    assert!(
+        !output.contains("unrelated") && !output.contains("std"),
+        "{output}"
+    );
+
+    let by_suffix = stdout(&fixture.drift(&["importers", "model.rs"]));
+    assert_eq!(by_suffix, output);
+
+    let python = stdout(&fixture.drift(&["importers", "pkg/mod_b.py"]));
+    assert!(python.contains("pkg/mod_a.py  .: mod_b"), "{python}");
+}
+
+#[test]
 fn skill_only_recommends_commands_that_exist() {
     let skill = include_str!("../src/skill.md");
     for command in [

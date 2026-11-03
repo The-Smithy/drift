@@ -3,6 +3,7 @@ mod rust;
 mod sql;
 mod typescript;
 
+pub use rust::split_top_level;
 use tree_sitter::{Language, Node, Parser, Tree};
 
 use crate::model::{Import, ImportNames, Symbol, TestFile};

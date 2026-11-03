@@ -121,7 +121,7 @@ Add `.drift-index.json` to your `.gitignore`. It contains an absolute path and g
 | `drift query <symbol>` | Find where a symbol is defined. Exact names match first, then case-insensitive substrings |
 | `drift outline <file>` | List a file's symbols with line ranges, and its imports. Takes a full path or a trailing part such as `lib/auth.ts` |
 | `drift tests [text]` | With no text, summarize every test file. With text, show the tests whose path, suite or name contains it |
-| `drift importers <module>` | Find the files that import a module. A file path resolves relative imports and `@/` or `~/` aliases in JS and TS, and module paths in Python. Anything else, including Rust paths, matches as text in the import source |
+| `drift importers <module>` | Find the files that import a module. A file path resolves relative imports and `@/` or `~/` aliases in JS and TS, module paths in Python, and `use` paths and `mod` declarations in Rust. Anything else matches as text in the import source |
 | `drift stats` | Show index statistics |
 | `drift batch <parent>` | Index every git repo directly under a directory |
 | `drift install [path]` | Install the Claude Code skill into a repo |
