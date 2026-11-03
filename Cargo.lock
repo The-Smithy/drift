@@ -166,6 +166,7 @@ dependencies = [
  "clap",
  "humantime",
  "ignore",
+ "libmimalloc-sys",
  "mimalloc",
  "rayon",
  "regex",

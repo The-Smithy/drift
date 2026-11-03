@@ -1,3 +1,5 @@
+#[cfg(target_env = "musl")]
+mod allocator;
 mod extract;
 mod index;
 mod lookup;
@@ -15,11 +17,6 @@ use index::{INDEX_FILE, index_repo, read_index, resolve_root, write_index};
 use model::Index;
 
 const SKILL: &str = include_str!("skill.md");
-
-// musl's allocator contends badly across threads, which made parallel indexing about 3x slower.
-#[cfg(target_env = "musl")]
-#[global_allocator]
-static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 #[derive(Parser)]
 #[command(
