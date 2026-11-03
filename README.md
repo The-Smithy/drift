@@ -30,6 +30,8 @@ $ drift query UserController
   class        UserController  src/controllers/user.ts:12-140 (exported)
 ```
 
+The same goes for understanding a file. On a 418-line file, `drift outline` returned 1.5 KB, where reading the file costs 22 KB and reading the repo's index costs about 800 KB.
+
 **Tested across 27 real repos:** 4,595 files and 924,000 lines, giving 43,604 symbols and 5,101 test cases, indexed in about 2.5 seconds on one Windows machine. Every symbol was checked against its source file, and the name was at the recorded location in all of them.
 
 ## Install
@@ -56,6 +58,14 @@ drift index . --compact
 drift query UserController
 ```
 
+**See what a file contains, find its tests, and find who imports it:**
+
+```bash
+drift outline src/lib/auth.ts
+drift tests auth
+drift importers src/lib/auth.ts
+```
+
 **Index every repo under a directory:**
 
 ```bash
@@ -68,7 +78,7 @@ drift batch ~/Development --compact
 drift install .
 ```
 
-This writes `.claude/skills/drift/SKILL.md`, which tells agents to run `drift query` before grepping.
+This writes `.claude/skills/drift/SKILL.md`, which tells agents to use these lookups before grepping.
 
 Add `.drift-index.json` to your `.gitignore`. It contains an absolute path and goes stale quickly.
 
@@ -78,6 +88,9 @@ Add `.drift-index.json` to your `.gitignore`. It contains an absolute path and g
 |---------|-------------|
 | `drift index [path]` | Index a repo and write `.drift-index.json` |
 | `drift query <symbol>` | Find where a symbol is defined. Exact names match first, then case-insensitive substrings |
+| `drift outline <file>` | List a file's symbols with line ranges, and its imports. Takes a full path or a trailing part such as `lib/auth.ts` |
+| `drift tests [text]` | With no text, summarize every test file. With text, show the tests whose path, suite or name contains it |
+| `drift importers <module>` | Find the files that import a module. A file path resolves relative imports and `@/` or `~/` aliases in JS and TS, and module paths in Python. Anything else, including Rust paths, matches as text in the import source |
 | `drift stats` | Show index statistics |
 | `drift batch <parent>` | Index every git repo directly under a directory |
 | `drift install [path]` | Install the Claude Code skill into a repo |
@@ -91,7 +104,7 @@ Add `.drift-index.json` to your `.gitignore`. It contains an absolute path and g
 | `--ignore-dirs` | `index` | Extra directory names to skip |
 | `--ignore-files` | `index` | Extra file names to skip |
 | `--install` | `batch` | Also install the Claude Code skill in each repo |
-| `--index` | `query`, `stats` | Path to the index file (default: `.drift-index.json`) |
+| `--index` | `query`, `outline`, `tests`, `importers`, `stats` | Path to the index file (default: `.drift-index.json`) |
 
 ## Supported Languages
 
@@ -185,7 +198,7 @@ This example shows compact output. Without `--compact`, every field is present, 
 
 See [AGENTS.md](AGENTS.md) for detailed integration instructions.
 
-**The short version:** run `drift query <symbol>` before grepping, then read only the line range it prints. Don't read the index file itself. A large repo's index runs to hundreds of kilobytes, and with `--compact` it is a single line.
+**The short version:** use `drift query`, `drift outline`, `drift tests` and `drift importers` before grepping, then read only the lines you need. Don't read the index file itself. A large repo's index runs to hundreds of kilobytes, and with `--compact` it is a single line.
 
 ### Claude Code
 
@@ -195,7 +208,7 @@ Run `drift install .` in any repo. Claude Code will then load the skill when wor
 
 Add this to your agent's instructions file:
 
-> Before searching for where something is defined, run `drift query <symbol>`. It prints the kind, `file:start-end` and export status. Read only that line range. Do not read `.drift-index.json` directly, because it is large.
+> Before grepping or reading whole files, use Drift: `drift query <symbol>` finds a definition, `drift outline <file>` lists a file's symbols and imports, `drift tests <text>` finds tests, and `drift importers <path>` finds who imports a module. Read only the line ranges they print. Do not read `.drift-index.json` directly, because it is large.
 
 ## License
 

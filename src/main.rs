@@ -1,5 +1,6 @@
 mod extract;
 mod index;
+mod lookup;
 mod model;
 
 use std::collections::{BTreeMap, HashSet};
@@ -11,7 +12,7 @@ use anyhow::{Result, ensure};
 use clap::{Parser, Subcommand};
 
 use index::{INDEX_FILE, index_repo, read_index, resolve_root, write_index};
-use model::{Index, Symbol};
+use model::Index;
 
 const SKILL: &str = include_str!("skill.md");
 
@@ -55,6 +56,30 @@ enum Command {
         #[arg(long, default_value = INDEX_FILE)]
         index: PathBuf,
     },
+    /// List a file's symbols and imports without reading it
+    Outline {
+        /// File path, or a trailing part of one such as lib/auth.ts
+        file: String,
+        /// Path to index file
+        #[arg(long, default_value = INDEX_FILE)]
+        index: PathBuf,
+    },
+    /// List test files, or find tests by path, suite or case name
+    Tests {
+        /// Case-insensitive text to look for; omit to summarize every test file
+        pattern: Option<String>,
+        /// Path to index file
+        #[arg(long, default_value = INDEX_FILE)]
+        index: PathBuf,
+    },
+    /// Find the files that import a module
+    Importers {
+        /// File path such as src/lib/auth.ts, or text to find in import sources
+        module: String,
+        /// Path to index file
+        #[arg(long, default_value = INDEX_FILE)]
+        index: PathBuf,
+    },
     /// Show index statistics
     Stats {
         /// Path to index file
@@ -89,7 +114,10 @@ fn main() -> Result<()> {
             ignore_files,
             compact,
         } => cmd_index(&path, output, &ignore_dirs, &ignore_files, compact),
-        Command::Query { symbol, index } => cmd_query(&symbol, &index),
+        Command::Query { symbol, index } => lookup::query(&symbol, &index),
+        Command::Outline { file, index } => lookup::outline(&file, &index),
+        Command::Tests { pattern, index } => lookup::tests(pattern.as_deref(), &index),
+        Command::Importers { module, index } => lookup::importers(&module, &index),
         Command::Stats { index } => cmd_stats(&index),
         Command::Batch {
             parent,
@@ -132,48 +160,6 @@ fn cmd_index(
     println!("Output: {} ({:.1} KB)", output.display(), size_kb(&output));
     println!("Time: {:.2}s", elapsed.as_secs_f64());
     Ok(())
-}
-
-fn cmd_query(query: &str, index_path: &Path) -> Result<()> {
-    let index = read_index(index_path)?;
-
-    // Reads `files`, not `symbol_index`: compact indexes drop private symbols from the latter.
-    let mut matches = find_symbols(&index, |name| name == query);
-    if matches.is_empty() {
-        let lowered = query.to_lowercase();
-        matches = find_symbols(&index, |name| name.to_lowercase().contains(&lowered));
-    }
-    if matches.is_empty() {
-        println!("No matches for '{query}'");
-        std::process::exit(1);
-    }
-
-    for (file, symbol) in matches {
-        let range = match symbol.end_line {
-            Some(end) if end != symbol.line => format!("{}-{}", symbol.line, end),
-            _ => symbol.line.to_string(),
-        };
-        let exported = if symbol.exported { " (exported)" } else { "" };
-        let parent = symbol
-            .parent
-            .as_ref()
-            .map(|p| format!(" in {p}"))
-            .unwrap_or_default();
-        println!(
-            "  {:12} {}  {}:{}{}{}",
-            symbol.kind, symbol.name, file, range, exported, parent
-        );
-    }
-    Ok(())
-}
-
-fn find_symbols(index: &Index, matches: impl Fn(&str) -> bool) -> Vec<(&str, &Symbol)> {
-    index
-        .files
-        .iter()
-        .flat_map(|(path, file)| file.symbols.iter().map(move |s| (path.as_str(), s)))
-        .filter(|(_, symbol)| matches(&symbol.name))
-        .collect()
 }
 
 fn cmd_stats(index_path: &Path) -> Result<()> {

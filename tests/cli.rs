@@ -240,6 +240,147 @@ fn non_utf8_and_bom_files_still_index() {
     assert_eq!(index["symbol_index"]["Json"][0]["kind"], "type");
 }
 
+fn lookup_fixture(name: &str) -> Fixture {
+    let fixture = Fixture::new(name);
+    fixture.write(
+        "src/lib/auth.ts",
+        "import { sign } from 'jsonwebtoken';\n\
+         export class Auth {\n  check() {}\n}\n\
+         function helper() {}\n",
+    );
+    fixture.write("src/lib/oauth.ts", "export const o = 1;\n");
+    fixture.write(
+        "src/app/page.ts",
+        "import { Auth } from '../lib/auth';\nimport * as all from '@/lib/oauth';\n",
+    );
+    fixture.write("src/admin/auth.ts", "import '../lib/oauth';\n");
+    fixture.write(
+        "tests/auth.test.ts",
+        "describe('login', () => {\n  it('accepts a token', () => {});\n  it('rejects a bad one', () => {});\n});\n\
+         describe('logout', () => {\n  it('clears the session', () => {});\n});\n",
+    );
+    assert!(fixture.drift(&["index", ".", "--compact"]).status.success());
+    fixture
+}
+
+#[test]
+fn outline_lists_symbols_and_imports() {
+    let fixture = lookup_fixture("outline");
+
+    let output = stdout(&fixture.drift(&["outline", "src/lib/auth.ts"]));
+    assert!(
+        output.contains("src/lib/auth.ts  typescript, 6 lines"),
+        "{output}"
+    );
+    assert!(output.contains("Auth  2-4 (exported)"), "{output}");
+    assert!(output.contains("check  3 (exported) in Auth"), "{output}");
+    assert!(
+        output.contains("helper  5\n") || output.contains("helper  5\r\n"),
+        "{output}"
+    );
+    assert!(output.contains("jsonwebtoken: sign"), "{output}");
+
+    let by_suffix = stdout(&fixture.drift(&["outline", "lib/auth.ts"]));
+    assert!(
+        by_suffix.contains("src/lib/auth.ts  typescript"),
+        "{by_suffix}"
+    );
+
+    let canonical = fs::canonicalize(&fixture.root).unwrap();
+    let root_text = canonical.to_string_lossy();
+    let root_text = root_text.strip_prefix(r"\\?\").unwrap_or(&root_text);
+    let absolute = Path::new(root_text).join("src").join("lib").join("auth.ts");
+    let output = stdout(&fixture.drift(&["outline", absolute.to_str().unwrap()]));
+    assert!(output.contains("src/lib/auth.ts  typescript"), "{output}");
+}
+
+#[test]
+fn outline_reports_ambiguous_and_unknown_files() {
+    let fixture = lookup_fixture("outline-ambiguous");
+
+    let ambiguous = fixture.drift(&["outline", "auth.ts"]);
+    assert_eq!(ambiguous.status.code(), Some(1));
+    let output = stdout(&ambiguous);
+    assert!(
+        output.contains("src/lib/auth.ts") && output.contains("src/admin/auth.ts"),
+        "{output}"
+    );
+    assert!(!output.contains("oauth"), "{output}");
+
+    let unknown = fixture.drift(&["outline", "nope.ts"]);
+    assert_eq!(unknown.status.code(), Some(1));
+}
+
+#[test]
+fn tests_summarize_and_filter() {
+    let fixture = lookup_fixture("tests");
+
+    let summary = stdout(&fixture.drift(&["tests"]));
+    assert!(
+        summary.contains("tests/auth.test.ts  unknown  3 tests"),
+        "{summary}"
+    );
+    assert!(summary.contains("3 tests across 1 files"), "{summary}");
+
+    let by_case = stdout(&fixture.drift(&["tests", "TOKEN"]));
+    assert!(by_case.contains("login"), "{by_case}");
+    assert!(by_case.contains("2  accepts a token"), "{by_case}");
+    assert!(
+        !by_case.contains("rejects") && !by_case.contains("logout"),
+        "{by_case}"
+    );
+
+    let by_suite = stdout(&fixture.drift(&["tests", "logout"]));
+    assert!(by_suite.contains("clears the session"), "{by_suite}");
+    assert!(!by_suite.contains("accepts"), "{by_suite}");
+
+    let by_path = stdout(&fixture.drift(&["tests", "auth.test"]));
+    assert!(
+        by_path.contains("accepts") && by_path.contains("clears"),
+        "{by_path}"
+    );
+
+    assert_eq!(fixture.drift(&["tests", "nope"]).status.code(), Some(1));
+}
+
+#[test]
+fn importers_resolve_paths_and_match_text() {
+    let fixture = lookup_fixture("importers");
+
+    let by_path = stdout(&fixture.drift(&["importers", "src/lib/auth.ts"]));
+    assert!(
+        by_path.contains("src/app/page.ts  ../lib/auth: Auth"),
+        "{by_path}"
+    );
+    assert!(!by_path.contains("oauth"), "{by_path}");
+
+    let oauth = stdout(&fixture.drift(&["importers", "src/lib/oauth.ts"]));
+    assert!(oauth.contains("src/app/page.ts  @/lib/oauth: *"), "{oauth}");
+    assert!(oauth.contains("src/admin/auth.ts  ../lib/oauth"), "{oauth}");
+
+    let by_text = stdout(&fixture.drift(&["importers", "jsonwebtoken"]));
+    assert!(
+        by_text.contains("src/lib/auth.ts  jsonwebtoken: sign"),
+        "{by_text}"
+    );
+
+    assert_eq!(fixture.drift(&["importers", "nope"]).status.code(), Some(1));
+}
+
+#[test]
+fn skill_only_recommends_commands_that_exist() {
+    let skill = include_str!("../src/skill.md");
+    for command in [
+        "drift query",
+        "drift outline",
+        "drift tests",
+        "drift importers",
+    ] {
+        assert!(skill.contains(command), "{command}");
+    }
+    assert!(!skill.contains("jq "));
+}
+
 #[test]
 fn missing_index_fails_with_a_clear_message() {
     let fixture = Fixture::new("missing");

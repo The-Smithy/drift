@@ -1,6 +1,6 @@
 ---
 name: drift
-description: Find where functions, classes, types, tables and other symbols are defined using the Drift index instead of grepping. Use before searching for code in a repo that has a .drift-index.json file.
+description: Find where functions, classes, types, tables and tests are defined, see what a file contains, and trace who imports a module, using the Drift index instead of grepping. Use before searching for code in a repo that has a .drift-index.json file.
 paths:
   - "**/*.ts"
   - "**/*.tsx"
@@ -17,40 +17,22 @@ paths:
 
 # Drift: index-first code navigation
 
-`.drift-index.json` maps every symbol to its file and line range, and records each file's imports and test cases.
+`.drift-index.json` maps every symbol to its file and line range, and records each file's imports and test cases. Run these commands from the repo root before grepping or reading whole files.
 
-## Finding a definition
+| To | Run | You get |
+|----|-----|---------|
+| Find a definition | `drift query <symbol>` | Kind, `file:start-end`, export status. Exact names first, then substrings |
+| See what a file contains | `drift outline <file>` | Its symbols with line ranges, and its imports |
+| Find tests | `drift tests <text>` | Matching tests by path, suite or case name, with line numbers |
+| List all test files | `drift tests` | Each file's framework and test count |
+| See who imports a module | `drift importers <path or text>` | Importing files. A path like `src/lib/auth.ts` resolves relative imports and `@/` aliases |
 
-Run this before grepping for where something is defined:
+Then read only the line range you need.
 
-```bash
-drift query <symbol>
-```
-
-It prints the kind, `file:start-end` and whether the symbol is exported. Exact names match first, then case-insensitive substrings. Read only that line range of the file.
-
-## Do not read the index file directly
-
-The index can be hundreds of kilobytes, and with `--compact` it is one line, so reading or grepping it returns all of it. Use `drift query`, or a tool that extracts one key:
-
-```bash
-jq '.files["src/auth.ts"]' .drift-index.json
-jq '.tests | keys' .drift-index.json
-```
-
-If `jq` isn't installed, use a short script in any language that parses the JSON and prints only the key you need.
-
-## Index structure
-
-```
-files.<path>.symbols -> [{name, kind, line, end_line, exported, parent}]
-files.<path>.imports -> [{source, names}]
-tests.<path>.suites  -> [{name, line, cases: [{name, line}]}]
-symbol_index.<name>  -> [{file, line, end_line, kind, exported}]
-```
+Do not read or grep `.drift-index.json` itself. It can be hundreds of kilobytes, and with `--compact` it is one line, so either returns all of it.
 
 ## When to use Grep or Read instead
 
-- The index is missing, or older than your recent changes (check `generated_at`). Run `drift index . --compact` to refresh it.
+- The index is missing, or older than your recent changes (`drift stats` shows when it was generated). Run `drift index . --compact` to refresh it.
 - You need the implementation, not the location.
-- You are searching for string literals, comments or call sites. The index records definitions, not usages.
+- You are searching for string literals, comments or call sites. The index records definitions and imports, not usages.
