@@ -319,7 +319,9 @@ fn search_note(index: &Index, name: &str) -> Option<String> {
         .flat_map(|(path, file)| {
             file.symbols
                 .iter()
-                .filter(|symbol| symbol.name == name && symbol.kind != "heading")
+                .filter(|symbol| {
+                    symbol.name == name && !matches!(symbol.kind.as_str(), "heading" | "key")
+                })
                 .map(move |symbol| format!("{path}:{}", symbol.line))
         })
         .collect();

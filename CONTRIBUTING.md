@@ -94,11 +94,12 @@ cargo test
 ## Adding a language
 
 1. Check real usage first. Roadmap priorities come from what agents actually read, so say why this language matters.
-2. Add a grammar crate and a file in `src/extract/`, following an existing extractor. Register it in `src/extract/mod.rs`, in both `is_supported` and `extract`.
+2. Add a grammar crate and a file in `src/extract/`, following an existing extractor. Register it in `src/extract/mod.rs`, in `is_supported` and `extract`, and in `reference_lines` so `drift refs` works.
 3. Use tree-sitter unless a grammar can't do the job, so commented-out code and strings aren't mistaken for definitions. SQL is the one exception today.
 4. Add tests for each kind of symbol, for exports, for imports and for test discovery. Include the cases that are easy to get wrong.
 5. Run it on a real repo in that language and check the symbols against the source.
-6. Update the language tables in `README.md` and `AGENTS.md`.
+6. Add a pinned public repo in that language to `bench/corpus.txt`, so CI measures it.
+7. Update the language tables in `README.md` and `AGENTS.md`.
 
 Note the change in binary size in your PR. Each grammar adds to it.
 

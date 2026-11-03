@@ -112,6 +112,7 @@ pub fn path_tier(path: &str) -> u8 {
 
     const LOW: &[&str] = &[
         "golden",
+        "addons",
         "fixtures",
         "fixture",
         "__fixtures__",
@@ -127,9 +128,9 @@ pub fn path_tier(path: &str) -> u8 {
     ];
     if directories.iter().any(|d| LOW.contains(d))
         || file.ends_with(".d.ts")
-        || file.ends_with(".md")
-        || file.ends_with(".mdx")
-        || file.ends_with(".markdown")
+        || file.ends_with(".designer.cs")
+        || file.ends_with(".g.cs")
+        || crate::extract::is_data_file(file)
         || file.contains(".gen.")
         || file.contains(".generated.")
     {
@@ -188,8 +189,10 @@ fn symbols_where<'a>(
     matches
 }
 
-// `name`, `Parent.name` or `path:name`.
+// `name`, `Parent.name`, `Parent::name`, `path:name` or `path:line`.
 fn exact_matches<'a>(index: &'a Index, selector: &str, view: &View) -> Vec<Located<'a>> {
+    let spelled_with_dots = selector.contains("::").then(|| selector.replace("::", "."));
+    let selector = spelled_with_dots.as_deref().unwrap_or(selector);
     let (file, name) = match selector.rsplit_once(':') {
         Some((file, name)) if !file.is_empty() && !name.is_empty() && !file.ends_with(':') => {
             (Some(file), name)
@@ -197,6 +200,12 @@ fn exact_matches<'a>(index: &'a Index, selector: &str, view: &View) -> Vec<Locat
         _ => (None, selector),
     };
     let wanted_file = file.map(|file| normalize_path(file, &index.root));
+    // Overloads share a name, so a line number is the only way to pick one.
+    if let (Some(wanted), Ok(line)) = (&wanted_file, name.parse::<u32>()) {
+        return symbols_where(index, view, |path, symbol| {
+            symbol.line == line && (path == wanted || ends_with_path(path, wanted))
+        });
+    }
     let (parent, name) = match name.rsplit_once('.') {
         Some((parent, name)) if !name.is_empty() => (Some(parent), name),
         _ => (None, name),
@@ -450,7 +459,11 @@ fn base_name(path: &str) -> &str {
     let file = path.rsplit('/').next().unwrap_or(path);
     let stem = file.split('.').next().unwrap_or(file);
     let stem = stem.strip_prefix("test_").unwrap_or(stem);
-    stem.strip_suffix("_test").unwrap_or(stem)
+    ["_test", "_tests", "_spec", "Tests", "Test", "Spec"]
+        .iter()
+        .find_map(|suffix| stem.strip_suffix(suffix))
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(stem)
 }
 
 // Test files for a source file: its own inline tests, ones that import it, and ones named after it.
@@ -563,7 +576,9 @@ pub fn importers(index: &Index, module: &str, view: &View) -> Answer {
 }
 
 pub fn show(index: &Index, selector: &str, view: &View) -> Answer {
-    let matches = exact_matches(index, selector, view);
+    let mut matches = exact_matches(index, selector, view);
+    // A definition is what's wanted, not its one-line declaration in a header.
+    matches.sort_by_key(|(_, symbol)| symbol.end_line.unwrap_or(symbol.line) == symbol.line);
     let Some(((path, symbol), others)) = matches.split_first() else {
         let name = selector.rsplit([':', '.']).next().unwrap_or(selector);
         return Answer::missing(miss_message(index, name));
@@ -595,7 +610,7 @@ pub fn show(index: &Index, selector: &str, view: &View) -> Answer {
             String::new()
         };
         lines.push(format!(
-            "Also defined at {}{suffix}. Pick one with path:name.",
+            "Also defined at {}{suffix}. Pick one with path:line.",
             also.join(", ")
         ));
     }

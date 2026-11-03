@@ -28,7 +28,10 @@ const DEFAULT_IGNORE_DIRS: &[&str] = &[
 ];
 
 const DEFAULT_IGNORE_FILES: &[&str] = &[
+    INDEX_FILE,
     "package-lock.json",
+    "npm-shrinkwrap.json",
+    "packages.lock.json",
     "yarn.lock",
     "pnpm-lock.yaml",
     "Cargo.lock",

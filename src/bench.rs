@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::index::{index_repo, read_source, resolve_root};
 use crate::lookup::{self, Answer, BUNDLE_CAP, LOOKUP_CAP, SOURCE_CAP, View, fit, path_tier};
-use crate::model::Symbol;
+use crate::model::{Index, Symbol};
 use crate::overview;
 
 const BYTES_PER_TOKEN: u64 = 4;
@@ -86,9 +86,12 @@ impl Corpus<'_> {
             |_| true,
             |line| {
                 line.contains(stem)
-                    && ["import", "require", "from ", "use ", "mod "]
-                        .iter()
-                        .any(|word| line.contains(word))
+                    && [
+                        "import", "require", "from ", "use ", "mod ", "#include", "preload(",
+                        "using ",
+                    ]
+                    .iter()
+                    .any(|word| line.contains(word))
             },
         )
     }
@@ -127,8 +130,18 @@ fn spread<T: Clone>(items: &[T], count: usize) -> Vec<T> {
         .collect()
 }
 
-fn selector(path: &str, symbol: &Symbol) -> String {
-    format!("{path}:{}", symbol.name)
+// Overloads share a name in one file, so those need a line number to tell apart.
+fn selector(index: &Index, path: &str, symbol: &Symbol) -> String {
+    let same_name = index.files[path]
+        .symbols
+        .iter()
+        .filter(|other| other.name == symbol.name)
+        .count();
+    if same_name > 1 {
+        format!("{path}:{}", symbol.line)
+    } else {
+        format!("{path}:{}", symbol.name)
+    }
 }
 
 fn summarize(task: &str, measures: &[Measure]) -> KindReport {
@@ -202,7 +215,7 @@ pub fn measure(root: &Path, per_kind: usize) -> Result<Report> {
     let measures: Vec<Measure> = picked
         .iter()
         .map(|(path, symbol)| {
-            let answer = lookup::show(&index, &selector(path, symbol), &corpus.view);
+            let answer = lookup::show(&index, &selector(&index, path, symbol), &corpus.view);
             let out = corpus.output(&answer, SOURCE_CAP);
             let first_line = corpus
                 .sources
@@ -220,7 +233,7 @@ pub fn measure(root: &Path, per_kind: usize) -> Result<Report> {
     let measures: Vec<Measure> = picked
         .iter()
         .map(|(path, symbol)| {
-            let names = [selector(path, symbol)];
+            let names = [selector(&index, path, symbol)];
             let answer = lookup::sig(&index, &names, &corpus.view);
             let out = corpus.output(&answer, LOOKUP_CAP);
             Measure {

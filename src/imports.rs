@@ -2,7 +2,7 @@ use crate::extract::split_top_level;
 use crate::model::{Import, ImportNames, Symbol};
 
 const SOURCE_EXTENSIONS: &[&str] = &[
-    ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".py", ".rs",
+    ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".py", ".rs", ".lua", ".gd",
 ];
 
 pub fn ends_with_path(path: &str, suffix: &str) -> bool {
@@ -22,6 +22,12 @@ pub fn module_key(path: &str) -> String {
     let key = without_extension
         .strip_suffix("/index")
         .or_else(|| without_extension.strip_suffix("/__init__"))
+        .or_else(|| {
+            lowered
+                .ends_with(".lua")
+                .then(|| without_extension.strip_suffix("/init"))
+                .flatten()
+        })
         .unwrap_or(without_extension);
     key.trim_end_matches('/').to_string()
 }
@@ -205,8 +211,18 @@ pub fn resolve_source(importer: &str, lang: &str, source: &str) -> Option<String
         let climb = "../".repeat(dots - 1);
         return join_relative(importer, &format!("./{climb}{module}"));
     }
-    if lang == "rust" {
-        return None;
+    match lang {
+        // C# imports name a namespace, which says nothing about the file.
+        "rust" | "csharp" => return None,
+        "lua" => return Some(source.replace('.', "/").to_lowercase()),
+        // Include paths are searched for, so this is matched by its trailing path.
+        "c" | "cpp" if !source.starts_with('.') => return Some(source.to_lowercase()),
+        "gdscript" => {
+            if let Some(path) = source.strip_prefix("res://") {
+                return Some(path.to_string());
+            }
+        }
+        _ => {}
     }
     if source.starts_with('.') {
         return join_relative(importer, source);

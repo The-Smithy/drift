@@ -32,27 +32,32 @@ class UserController  src/controllers/user.ts:12-140 (exported)
 
 ### Measured savings
 
-`drift bench` runs a standard set of tasks on any repo. Here it is on four public projects pinned in [`bench/corpus.txt`](bench/corpus.txt):
+`drift bench` runs a standard set of tasks on any repo. Here it is on nine public projects pinned in [`bench/corpus.txt`](bench/corpus.txt):
 
-| Repo | Tokens without Drift | Tokens with Drift | Saved |
-|------|----------------------|-------------------|-------|
-| [flask](https://github.com/pallets/flask) | 197,213 | 9,886 | 95.0% |
-| [express](https://github.com/expressjs/express) | 48,142 | 2,953 | 93.9% |
-| [ripgrep](https://github.com/BurntSushi/ripgrep) | 301,618 | 11,692 | 96.1% |
-| [vue core](https://github.com/vuejs/core) | 155,110 | 10,771 | 93.1% |
+| Repo | Language | Tokens without Drift | Tokens with Drift | Saved |
+|------|----------|----------------------|-------------------|-------|
+| [flask](https://github.com/pallets/flask) | Python | 197,293 | 9,893 | 95.0% |
+| [express](https://github.com/expressjs/express) | JavaScript | 48,805 | 2,960 | 93.9% |
+| [ripgrep](https://github.com/BurntSushi/ripgrep) | Rust | 302,231 | 11,512 | 96.2% |
+| [vue core](https://github.com/vuejs/core) | TypeScript | 167,096 | 10,500 | 93.7% |
+| [godot-open-rpg](https://github.com/gdquest-demos/godot-open-rpg) | GDScript | 55,896 | 5,349 | 90.4% |
+| [plenary.nvim](https://github.com/nvim-lua/plenary.nvim) | Lua | 69,550 | 4,624 | 93.4% |
+| [jq](https://github.com/jqlang/jq) | C | 237,047 | 6,490 | 97.3% |
+| [leveldb](https://github.com/google/leveldb) | C++ | 151,897 | 13,617 | 91.0% |
+| [serilog](https://github.com/serilog/serilog) | C# | 184,994 | 17,959 | 90.3% |
 
-And by task, across all four:
+And by task, across all nine:
 
 | Task | Without Drift, compared with | Saved |
 |------|------------------------------|-------|
-| See a signature | Reading the file | 98–99% |
-| Read one function | Reading the file | 91–99% |
-| Find a definition | Grep | 89–97% |
-| Understand a file | Reading the file | 87–95% |
+| See a signature | Reading the file | 96–100% |
+| Read one function | Reading the file | 86–99% |
+| Find a definition | Grep | 78–98% |
+| Understand a file | Reading the file | 80–95% |
 | Find a file's tests | Grep | 80–99% |
-| Find uses | Grep | 56–81% |
-| Find importers | Grep | 68–97% |
-| Orient in the repo | Listing every file | 52–92% |
+| Find uses | Grep | 26–83% |
+| Find importers | Grep | 67–97% |
+| Orient in the repo | Listing every file | 28–99% |
 
 These count tool output at about 4 bytes per token. The comparison is generous to the alternatives: searches stop at 250 lines and reads at 2,000, as they do in Claude Code. Results vary by repo, so run it on yours:
 
@@ -130,13 +135,13 @@ This adds a skill that agents load when they need it, a short section in `AGENTS
 |---------|-------------|
 | `drift query <symbol>...` | Find where symbols are defined. Exact names match first, then case-insensitive substrings |
 | `drift find <words>...` | Search names, doc comments and paths by words in any order, so `rate limit` finds `enforceRateLimit` |
-| `drift show <symbol>` | Print one definition's source. Takes a name, `Parent.name` or `path:name` |
+| `drift show <symbol>` | Print one definition's source. Takes a name, `Parent.name`, `Parent::name`, `path:name` or `path:line` |
 | `drift sig <symbol>...` | Print only a definition's signature and doc comment |
 | `drift outline <file>` | List a file's definitions with line ranges, and its imports. Add `--sig` for signatures |
 | `drift refs <symbol>` | Find uses, by file and enclosing definition, leaving out comments, strings and imports. Matches by name, not by type |
 | `drift tests [text]` | With no text, summarize every test file. With text, show the tests whose path, suite or name contains it |
 | `drift tests --for <file>` | Find the tests for a source file |
-| `drift importers <module>` | Find the files that import a module. A file path resolves relative imports and `@/` or `~/` aliases in JS and TS, module paths in Python, and `use` paths and `mod` declarations in Rust. Anything else matches as text in the import source |
+| `drift importers <module>` | Find the files that import a module. A file path resolves relative imports and `@/` or `~/` aliases in JS and TS, module paths in Python and Lua, `use` paths and `mod` declarations in Rust, `#include` paths in C and C++, and `res://` paths in GDScript. Anything else matches as text in the import source, which is how to search C# namespaces |
 | `drift context <target>` | Get what you need before changing a symbol or file: signature, uses, importers and tests |
 | `drift map` | Summarize a repo: folders, entry points and most imported files |
 | `drift changes [ref]` | List the definitions changed since a git ref, including uncommitted work |
@@ -182,7 +187,14 @@ Lookups stop at a size cap, 4 KB for most and 12 KB for `show`, and say how much
 | **Python** | `.py` | functions, methods, classes, constants, type aliases, decorators |
 | **Rust** | `.rs` | functions, methods, structs, enums, traits, impls, type aliases, consts, statics, macros, modules |
 | **SQL** | `.sql` | tables, views, functions, procedures, triggers, indexes, types, policies |
+| **C** | `.c`, `.h` | functions, prototypes, structs, unions, enums, typedefs, macros, globals |
+| **C++** | `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hh`, `.hxx`, `.ipp`, `.inl`, and `.h` files that contain C++ | the above plus classes, methods, templates, namespaces, type aliases. Export macros and Unreal's `UCLASS`-style macros are handled |
+| **C#** | `.cs` | classes, records, structs, interfaces, enums, delegates, namespaces, methods, properties, constants |
+| **GDScript** | `.gd` | classes, functions, signals, enums, constants, variables |
+| **Lua** | `.lua` | functions, table functions and methods, constants, tables |
 | **Markdown** | `.md`, `.mdx`, `.markdown` | headings, each with the line range of its section |
+| **JSON** | `.json`, `.jsonc` | keys, two levels deep |
+| **YAML** | `.yaml`, `.yml` | keys, two levels deep |
 
 ### Test Discovery
 
@@ -191,12 +203,16 @@ Lookups stop at a size cap, 4 KB for most and 12 KB for `show`, and say how much
 | TypeScript/JS | `describe`, `it`, `test` and their `.only`, `.skip`, `.each` forms, nested suites | Vitest, Jest, Mocha, Playwright, `node:test`, Cypress |
 | Python | `test_*` functions, `Test*` classes, and `TestCase` subclasses, including through a base class in the same file | pytest, unittest |
 | Rust | `#[test]`, `#[tokio::test]`, `#[rstest]`, and tests inside macros such as `proptest!` | cargo-test |
+| C and C++ | `TEST`, `TEST_F`, `TEST_CASE`, `BOOST_AUTO_TEST_CASE` and similar, in files that include the framework | GoogleTest, Catch2, doctest, Boost.Test, Criterion, Check, Unity, cmocka |
+| C# | Methods with `[Fact]`, `[Theory]`, `[Test]`, `[TestCase]` or `[TestMethod]` | xUnit, NUnit, MSTest |
+| GDScript | `test_*` functions in scripts or inner classes that extend the framework's class | GUT, gdUnit4 |
+| Lua | `describe` and `it`, or `test*` functions in files that use LuaUnit | busted, LuaUnit |
 
 A JS or TS test file that names no framework takes one from the nearest `package.json`. If that doesn't settle it, the framework is reported as `unknown`.
 
 ## How It Works
 
-Drift walks your repo in parallel and parses each file with [tree-sitter](https://tree-sitter.github.io/). Parsing rather than pattern matching means commented-out code and code inside strings are not mistaken for definitions. SQL is the exception: dialects vary too much for one grammar, so `CREATE` statements are matched by pattern, with comments removed first. Markdown is also read without a grammar, and skips code blocks, comments and front matter.
+Drift walks your repo in parallel and parses each file with [tree-sitter](https://tree-sitter.github.io/). Parsing rather than pattern matching means commented-out code and code inside strings are not mistaken for definitions. SQL is the exception: dialects vary too much for one grammar, so `CREATE` statements are matched by pattern, with comments removed first. Markdown is also read without a grammar, and skips code blocks, comments and front matter. JSON and YAML keys, like Markdown headings, rank below code.
 
 For each file it records:
 
@@ -209,7 +225,10 @@ For each file it records:
 - Types. `drift refs` finds uses by name when you ask, so unrelated things that share a common name can appear.
 - Generated symbols, such as Rust macro expansions or names built at runtime.
 - Local variables and functions nested inside JS or TS functions. Python nested functions are included.
-- Interface and struct members.
+- Interface and struct members, apart from methods, and C# properties and constants.
+- C and C++ code that only exists after the preprocessor runs. Export macros and Unreal's macros are handled, but unusual macros can hide a definition. In testing, jq lost 7 of 662 functions this way.
+- Which C# file a `using` refers to, because it names a namespace. `drift importers App.Core` searches them as text, and `drift tests --for` also matches test files named after the source file, such as `ServiceTests.cs`.
+- JSON and YAML keys past two levels, or past 300 in one file.
 - Non-test items inside Rust `#[cfg(test)]` modules, which are left out to keep the index small.
 - Declarations caught up in syntax the grammar can't read. About 0.5% of files had some in testing. Those files are still indexed, and declarations elsewhere in them are still found.
 
@@ -217,7 +236,7 @@ SQL `CREATE` statements inside dollar-quoted function bodies are counted as defi
 
 ### Ignored by default
 
-Drift respects `.gitignore` and `.ignore` files and skips hidden directories, `node_modules`, `dist`, `build`, `target`, `vendor`, `coverage`, `venv` and similar directories. It also skips lockfiles, `*.min.js` and files over 512 KB.
+Drift respects `.gitignore` and `.ignore` files and skips hidden directories, `node_modules`, `dist`, `build`, `target`, `vendor`, `coverage`, `venv` and similar directories. It also skips lockfiles, `*.min.js`, Drift's own index and files over 512 KB.
 
 ### Update notices
 

@@ -14,6 +14,17 @@ paths:
   - "**/*.rs"
   - "**/*.sql"
   - "**/*.md"
+  - "**/*.lua"
+  - "**/*.gd"
+  - "**/*.cs"
+  - "**/*.c"
+  - "**/*.h"
+  - "**/*.cpp"
+  - "**/*.cc"
+  - "**/*.hpp"
+  - "**/*.json"
+  - "**/*.yaml"
+  - "**/*.yml"
 ---
 
 # Drift: find code, read less
@@ -24,7 +35,7 @@ Run these before grepping or reading whole files. The index builds and refreshes
 |----|-----|
 | Find a definition | `drift query <symbol>` |
 | Search by words | `drift find rate limit` |
-| Read one definition | `drift show <symbol>` (or `path:name`, `Parent.name`) |
+| Read one definition | `drift show <symbol>` (or `path:name`, `path:line`, `Parent.name`) |
 | See how to call it | `drift sig <symbol>` |
 | See what a file or long doc contains | `drift outline <file>` |
 | Find uses | `drift refs <symbol>` |

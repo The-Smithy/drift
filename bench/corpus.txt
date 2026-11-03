@@ -4,3 +4,8 @@ flask https://github.com/pallets/flask 49943b5a94413a530761350f04e896f76e8d620e
 express https://github.com/expressjs/express 43fca52d28a422c8be48fd489cbd4f2d6152bab6
 ripgrep https://github.com/BurntSushi/ripgrep 91f5d22ef48bde459d90a8c7dbeab416e97d0f2b
 vue-core https://github.com/vuejs/core f64bfa57e0acba8150325abe598fe4e287e17692
+godot-open-rpg https://github.com/gdquest-demos/godot-open-rpg d59f2f71bc046ac53239a4e590861269e7100a36
+plenary https://github.com/nvim-lua/plenary.nvim 74b06c6c75e4eeb3108ec01852001636d85a932b
+jq https://github.com/jqlang/jq 5c001b18d7237cce1fdba63608732163f978dd23
+leveldb https://github.com/google/leveldb bb74ef739973a70ca9f0d90788a1da89b788c0ad
+serilog https://github.com/serilog/serilog 43105b35095337d77f022561a8f2d3db2f9a7937
