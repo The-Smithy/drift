@@ -2,7 +2,7 @@
 name = "drift-index"
 version = "0.2.0"
 edition = "2024"
-description = "A blacksmith's tool for pinpointing code. Fast codebase indexer for AI agents."
+description = "Pinpoint any code in your repo. Fast codebase indexer for AI agents."
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/The-Smithy/drift"

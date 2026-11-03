@@ -5,7 +5,7 @@
 <h1 align="center">Drift</h1>
 
 <p align="center">
-  <strong>A blacksmith's tool for pinpointing code.</strong><br>
+  <strong>Pinpoint any code in your repo.</strong><br>
   A fast, single-binary codebase indexer that gives AI agents a map before they search.
 </p>
 
