@@ -1,3 +1,5 @@
+#[cfg(target_env = "musl")]
+mod allocator;
 mod extract;
 mod index;
 mod lookup;

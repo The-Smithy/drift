@@ -50,6 +50,9 @@ pub fn extract(extension: &str, source: &str) -> Option<Extracted> {
 }
 
 fn parse(source: &str, language: Language) -> Option<Tree> {
+    #[cfg(target_env = "musl")]
+    crate::allocator::use_mimalloc_in_tree_sitter();
+
     let mut parser = Parser::new();
     parser.set_language(&language).ok()?;
     parser.parse(source, None)
