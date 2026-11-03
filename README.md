@@ -241,6 +241,10 @@ Add this to your agent's instructions file:
 
 > Before grepping or reading whole files, use Drift: `drift query <symbol>` finds a definition, `drift outline <file>` lists a file's symbols and imports, `drift tests <text>` finds tests, and `drift importers <path>` finds who imports a module. Read only the line ranges they print. Do not read `.drift-index.json` directly, because it is large.
 
+## Contributing
+
+Drift's only goal is to reduce the tokens agents spend on code. See [ROADMAP.md](ROADMAP.md) for what's planned and what was ruled out, and [CONTRIBUTING.md](CONTRIBUTING.md) for how to contribute.
+
 ## License
 
 MIT
