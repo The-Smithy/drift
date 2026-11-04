@@ -29,17 +29,17 @@ cargo build --release
 bench/run.sh --compare /tmp/before
 ```
 
-`bench/run.sh` runs `drift bench` on the public repos pinned in `bench/corpus.txt`, so your numbers mean the same as anyone else's. CI runs the same comparison on every PR that touches the code, and fails if a repo saves less than 50% or fewer than 90% of answers are right. Paste the results in your PR.
+`bench/run.sh` runs `drift bench` on the public repos pinned in `bench/corpus.txt`, so your numbers mean the same as anyone else's. CI runs the same comparison on every PR that touches the code, and fails if a repo saves less than 40% or fewer than 90% of answers are right. Paste the results in your PR.
 
 To try it on your own repo, use `drift bench <path>`, with `--json` to save a report and `--compare` to compare with one.
 
 **How to read the results:**
 
-- **without** is what an agent would otherwise read: a search capped at 250 lines, or the file capped at 2,000 lines, matching Claude Code's defaults.
+- **without** is what an agent would really print otherwise, from the costs in `src/savings.rs`: a search up to about 1.6 KB, a read of about 3.4 KB or what was needed, and the whole file half the time when learning what a file contains. `--json` also gives `uncapped_tokens`, the full output of the same searches and reads, which is a ceiling and not a saving.
 - **drift** is the output of the matching Drift command, with its default limits.
 - **right** counts answers containing the result the index expects. It catches a limit or ranking change that hides the answer, but because it relies on the index, it can't catch a wrong index. For that, see [Accuracy comes first](#accuracy-comes-first).
 
-If you add a lookup, add a task for it in `src/bench.rs`, and say what it replaces in `src/main.rs` so `drift savings` can count it. Baselines have to be what an agent would really do. Making them larger to improve the score defeats the point.
+If you add a lookup, add a task for it in `src/bench.rs`, and say what it replaces in `src/main.rs` so `drift savings` can count it. Baselines have to be what an agent would really do, so use those costs. Making them larger to improve the score defeats the point.
 
 ## Rules for output
 

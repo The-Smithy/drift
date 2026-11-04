@@ -35,7 +35,7 @@ Nothing else can be judged without this, so it comes first.
 
 | Item | What it does | Estimate |
 |------|--------------|----------|
-| **Benchmark suite** (built) | `drift bench` generates the same tasks from any repo, such as "find this definition" or "who imports this file", and compares Drift's output against the `grep` and `Read` route. `bench/run.sh` runs it on pinned public repos, and CI runs that on every PR. | 300K–600K |
+| **Benchmark suite** (built) | `drift bench` generates the same tasks from any repo, such as "find this definition" or "who imports this file", and compares Drift's output against what the `grep` and `Read` route really prints, using the same costs as `drift savings`. `bench/run.sh` runs it on pinned public repos, and CI runs that on every PR. | 300K–600K |
 | **`drift audit`** (built) | Reads local Claude Code transcripts and reports token share by tool, and how often agents used Drift or fell back to `grep`. Prints totals only, and never sends anything anywhere. | 200K–400K |
 | **`drift savings`** (built) | Logs each lookup on the user's machine and estimates what it saved, against the average cost of real searches and reads. | 300K–600K |
 

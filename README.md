@@ -32,41 +32,44 @@ class UserController  src/controllers/user.ts:12-140 (exported)
 
 ### Measured savings
 
-`drift bench` runs a standard set of tasks on any repo. Here it is on nine public projects pinned in [`bench/corpus.txt`](bench/corpus.txt):
+`drift bench` runs a standard set of tasks on any repo and compares Drift's output with what an agent would really print without it. Here it is on nine public projects pinned in [`bench/corpus.txt`](bench/corpus.txt):
 
 | Repo | Language | Tokens without Drift | Tokens with Drift | Saved |
 |------|----------|----------------------|-------------------|-------|
-| [flask](https://github.com/pallets/flask) | Python | 216,378 | 15,958 | 92.6% |
-| [express](https://github.com/expressjs/express) | JavaScript | 57,766 | 5,455 | 90.6% |
-| [ripgrep](https://github.com/BurntSushi/ripgrep) | Rust | 312,529 | 16,922 | 94.6% |
-| [vue core](https://github.com/vuejs/core) | TypeScript | 197,857 | 14,791 | 92.5% |
-| [godot-open-rpg](https://github.com/gdquest-demos/godot-open-rpg) | GDScript | 57,906 | 6,718 | 88.4% |
-| [plenary.nvim](https://github.com/nvim-lua/plenary.nvim) | Lua | 76,019 | 7,761 | 89.8% |
-| [jq](https://github.com/jqlang/jq) | C | 239,192 | 7,460 | 96.9% |
-| [leveldb](https://github.com/google/leveldb) | C++ | 160,215 | 16,590 | 89.6% |
-| [serilog](https://github.com/serilog/serilog) | C# | 194,515 | 25,895 | 86.7% |
+| [flask](https://github.com/pallets/flask) | Python | 69,543 | 15,958 | 77.1% |
+| [express](https://github.com/expressjs/express) | JavaScript | 37,072 | 5,455 | 85.3% |
+| [ripgrep](https://github.com/BurntSushi/ripgrep) | Rust | 69,025 | 16,922 | 75.5% |
+| [vue core](https://github.com/vuejs/core) | TypeScript | 45,988 | 14,791 | 67.8% |
+| [godot-open-rpg](https://github.com/gdquest-demos/godot-open-rpg) | GDScript | 28,843 | 6,718 | 76.7% |
+| [plenary.nvim](https://github.com/nvim-lua/plenary.nvim) | Lua | 39,531 | 7,761 | 80.4% |
+| [jq](https://github.com/jqlang/jq) | C | 43,462 | 7,460 | 82.8% |
+| [leveldb](https://github.com/google/leveldb) | C++ | 47,354 | 16,590 | 65.0% |
+| [serilog](https://github.com/serilog/serilog) | C# | 48,395 | 25,895 | 46.5% |
+| **All nine** | | **429,213** | **117,550** | **72.6%** |
 
 And by task, across all nine:
 
 | Task | Without Drift, compared with | Saved |
 |------|------------------------------|-------|
-| See a signature | Reading the file | 96–100% |
-| Read one function | Reading the file | 86–99% |
-| Find a definition | Grep | 78–98% |
-| Understand a file | Reading the file | 80–95% |
-| Find a file's tests | Grep | 80–99% |
-| Find uses | Grep | 26–83% |
-| Find importers | Grep | 67–97% |
-| Find in the docs | Grep, then reading 100 lines, since agents mostly read documents in pieces | 17–86% |
-| Orient in the repo | Listing every file | 28–99% |
+| See a signature | Reading about 3.4 KB of the file | 93–98% |
+| Find a file's tests | A search of up to about 1.6 KB | 63–95% |
+| Understand a file | Reading the file: the whole of it half the time, and otherwise about 3.4 KB | 71–92% |
+| Read one function | Reading about 3.4 KB, or the whole function if that's more | 58–90% |
+| Orient in the repo | Listing every file, up to about 4.3 KB | 28–97% |
+| Find importers | A search of up to about 1.6 KB | 22–93% |
+| Find in the docs | A search of up to about 1.6 KB, then reading about 3.4 KB or the whole section | 11–74% |
+| Find a definition | A search of up to about 1.6 KB | -2% to 92% |
+| Find uses | A search of up to about 1.6 KB | -75% to 60% |
 
-These count tool output at about 4 bytes per token, with searches stopped at 250 lines and reads at 2,000, as they are in Claude Code. Results vary by repo, so run it on yours:
+These count tool output at about 4 bytes per token, and use the same costs as `drift savings`. In one developer's recent sessions, 206 name searches printed about 1.6 KB on average, and about half of 522 reads of code files were ranges averaging about 3.4 KB. A search that would print less than 1.6 KB counts as what it would print. Results vary by repo, so run it on yours:
 
 ```bash
 drift bench .
 ```
 
-**Real savings are lower than these.** The benchmark compares with the full output of a search or read, and agents often trim theirs. In one developer's recent sessions, name searches printed about 1.6 KB on average. In total that was around 2% of what the benchmark's method estimates for the same searches, and the median search was around 9%. About half of the reads of code files were ranges. `drift savings` estimates from those lower costs instead.
+**These numbers used to read 87–97%.** That compared with a search's full output and with reading whole files, and agents rarely print that much. Drift's output didn't change, only what it's compared with. `drift bench` still prints the older total, and `--json` gives it as `uncapped_tokens`, but it's a ceiling and not a saving.
+
+**They're still estimates.** The costs come from one developer's sessions, and the tasks are spread evenly across a repo rather than matching what agents ask most. A negative number means Drift printed more than a trimmed search. That's most common with `drift refs`, which lists uses a trimmed search may have cut off, so the two don't show the same thing.
 
 ### Your own savings
 

@@ -49,8 +49,10 @@ jobs:
         run: |
           {
             echo '```'
+            # Compared with what agents really print, a 40% floor leaves less room for Drift's output
+            # to grow on every repo than 50% did against full greps and whole files.
             # shellcheck disable=SC2086
-            bench/run.sh ${COMPARE:-} --check 50
+            bench/run.sh ${COMPARE:-} --check 40
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
           exit "${PIPESTATUS[0]}"

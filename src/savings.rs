@@ -5,6 +5,7 @@
 //! What a search or read would have cost comes from real sessions, not from what a tool could
 //! print at most. Agents trim their searches with `head`, `-l` and filters, and about half their
 //! reads of code files are ranges, so an estimate from whole files and full greps runs far too high.
+//! `drift bench` uses the same costs, so the two agree.
 //!
 //! Set `DRIFT_NO_SAVINGS` to turn this off. It's also off when `CI` is set.
 
@@ -27,15 +28,15 @@ const OLD_LOG_FILE: &str = "savings.old.jsonl";
 const MAX_LOG_BYTES: u64 = 4 * 1024 * 1024;
 
 // The average name search across 206 real ones, most of them already trimmed by the agent.
-const SEARCH_BYTES: u64 = 1650;
+pub(crate) const SEARCH_BYTES: u64 = 1650;
 // The average ranged read of a code file across 268 real ones.
-const RANGED_READ_BYTES: u64 = 3400;
+pub(crate) const RANGED_READ_BYTES: u64 = 3400;
 // About half of 522 real reads of code files took the whole file.
 const WHOLE_READ_PERCENT: u64 = 50;
 // The average listing across 34 real ones.
-const LISTING_BYTES: u64 = 4300;
+pub(crate) const LISTING_BYTES: u64 = 4300;
 // Agent tools stop a read here, so a longer file doesn't cost more.
-const MAX_READ_LINES: u64 = 2000;
+pub(crate) const MAX_READ_LINES: u64 = 2000;
 
 /// What an agent would most likely have done without this lookup.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -125,13 +126,13 @@ fn readable_bytes(file_bytes: u64, lines: u64) -> u64 {
 
 /// What reading the part of a file an agent needs would print: at least what it needed, and
 /// no more than the file. Agents read about this much whether or not they read more elsewhere.
-fn range_cost(file_bytes: u64, lines: u64, needed: u64) -> u64 {
+pub(crate) fn range_cost(file_bytes: u64, lines: u64, needed: u64) -> u64 {
     readable_bytes(file_bytes, lines).min(needed.max(RANGED_READ_BYTES))
 }
 
 /// What reading to learn what a file contains would print: the whole file about half the time,
 /// and otherwise a range.
-fn file_cost(file_bytes: u64, lines: u64) -> u64 {
+pub(crate) fn file_cost(file_bytes: u64, lines: u64) -> u64 {
     let whole = readable_bytes(file_bytes, lines);
     let ranged = range_cost(file_bytes, lines, 0);
     (whole * WHOLE_READ_PERCENT + ranged * (100 - WHOLE_READ_PERCENT)) / 100

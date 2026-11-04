@@ -12,12 +12,14 @@ use crate::index::{index_repo, read_source, resolve_root};
 use crate::lookup::{self, Answer, BUNDLE_CAP, LOOKUP_CAP, SOURCE_CAP, View, fit, path_tier};
 use crate::model::{Index, Symbol};
 use crate::overview;
+use crate::savings::{
+    LISTING_BYTES, MAX_READ_LINES, RANGED_READ_BYTES, SEARCH_BYTES, file_cost, range_cost,
+};
 
 pub(crate) const BYTES_PER_TOKEN: u64 = 4;
 const MIN_ANSWERED_PERCENT: u64 = 90;
 const MAX_SEARCH_LINES: usize = 250;
-const MAX_READ_LINES: usize = 2000;
-// Agents mostly read documents in pieces, so that's the fair comparison, not reading the whole file.
+// Only for the uncapped figure, where a document search reads on from where it landed.
 const DOC_READ_LINES: usize = 100;
 const DOC_QUERY_WORDS: usize = 3;
 
@@ -25,7 +27,12 @@ const DOC_QUERY_WORDS: usize = 3;
 pub struct KindReport {
     pub task: String,
     pub tasks: u64,
+    /// What an agent would really print, from the same costs as `drift savings`.
     pub baseline_tokens: u64,
+    /// What a full search or whole-file read would print. Real agents trim, so this is a ceiling
+    /// and not a saving to quote. Reports saved before it existed don't have it.
+    #[serde(default)]
+    pub uncapped_tokens: u64,
     pub drift_tokens: u64,
     pub saved_percent: f64,
     pub answered: u64,
@@ -45,8 +52,21 @@ pub struct Report {
 
 struct Measure {
     baseline: u64,
+    uncapped: u64,
     drift: u64,
     answered: bool,
+}
+
+// A search costs what it would really print, up to what agents print on average once they trim.
+// A search with little to find stays cheap, so this can sit below the flat cost `drift savings`
+// uses, which can't know what a search would have found.
+fn search_measure(full_bytes: u64, drift: usize, answered: bool) -> Measure {
+    Measure {
+        baseline: full_bytes.min(SEARCH_BYTES),
+        uncapped: full_bytes,
+        drift: drift as u64,
+        answered,
+    }
 }
 
 struct Corpus<'a> {
@@ -124,8 +144,8 @@ fn doc_tasks(index: &Index, corpus: &Corpus, count: usize) -> Vec<DocTask> {
 }
 
 impl Corpus<'_> {
-    // What a search would return, stopped where agent tools stop. Claude Code's Grep defaults to
-    // 250 lines, so a baseline can't claim savings an agent would never have paid for.
+    // The most a search could return, stopped where agent tools stop. Claude Code's Grep defaults
+    // to 250 lines. Agents print far less, so baselines go through `search_measure`.
     fn search_bytes(
         &self,
         accept_file: impl Fn(&str) -> bool,
@@ -174,15 +194,34 @@ impl Corpus<'_> {
         self.search_bytes(|path| path_tier(path) == 1, |line| line.contains(stem))
     }
 
-    // Claude Code's Read stops at 2,000 lines by default.
+    // The most a read could return. Claude Code's Read stops at 2,000 lines by default. Agents
+    // often take a range instead, which `range_bytes` and `understand_bytes` allow for.
     fn file_bytes(&self, path: &str) -> u64 {
         self.sources.get(path).map_or(0, |source| {
             source
                 .lines()
-                .take(MAX_READ_LINES)
+                .take(MAX_READ_LINES as usize)
                 .map(|line| line.len() as u64 + 1)
                 .sum()
         })
+    }
+
+    fn size_of(&self, path: &str) -> (u64, u64) {
+        self.sources.get(path).map_or((0, 0), |source| {
+            (source.len() as u64, source.lines().count() as u64)
+        })
+    }
+
+    // Reading the part of a file that holds what was needed.
+    fn range_bytes(&self, path: &str, needed: usize) -> u64 {
+        let (bytes, lines) = self.size_of(path);
+        range_cost(bytes, lines, needed as u64)
+    }
+
+    // Reading to learn what a file contains.
+    fn understand_bytes(&self, path: &str) -> u64 {
+        let (bytes, lines) = self.size_of(path);
+        file_cost(bytes, lines)
     }
 
     fn doc_search_bytes(&self, word: &str) -> u64 {
@@ -244,6 +283,7 @@ fn summarize(task: &str, measures: &[Measure]) -> KindReport {
         task: task.to_string(),
         tasks: measures.len() as u64,
         baseline_tokens: baseline / BYTES_PER_TOKEN,
+        uncapped_tokens: measures.iter().map(|m| m.uncapped).sum::<u64>() / BYTES_PER_TOKEN,
         drift_tokens: drift / BYTES_PER_TOKEN,
         saved_percent: saved(baseline, drift),
         answered: measures.iter().filter(|m| m.answered).count() as u64,
@@ -303,11 +343,11 @@ pub fn measure(root: &Path, per_kind: usize) -> Result<Report> {
             let names = [symbol.name.clone()];
             let answer = lookup::query(&index, &names, &corpus.view);
             let out = corpus.output(&answer, LOOKUP_CAP);
-            Measure {
-                baseline: corpus.grep_bytes(&symbol.name),
-                drift: out.len() as u64,
-                answered: out.contains(&format!("{path}:{}", symbol.line)),
-            }
+            search_measure(
+                corpus.grep_bytes(&symbol.name),
+                out.len(),
+                out.contains(&format!("{path}:{}", symbol.line)),
+            )
         })
         .collect();
     kinds.push(summarize("find a definition", &measures));
@@ -322,7 +362,8 @@ pub fn measure(root: &Path, per_kind: usize) -> Result<Report> {
                 .get(path)
                 .and_then(|source| source.lines().nth(symbol.line as usize - 1).map(str::trim));
             Measure {
-                baseline: corpus.file_bytes(path),
+                baseline: corpus.range_bytes(path, out.len()),
+                uncapped: corpus.file_bytes(path),
                 drift: out.len() as u64,
                 answered: first_line.is_some_and(|line| out.contains(line)),
             }
@@ -337,7 +378,8 @@ pub fn measure(root: &Path, per_kind: usize) -> Result<Report> {
             let answer = lookup::sig(&index, &names, &corpus.view);
             let out = corpus.output(&answer, LOOKUP_CAP);
             Measure {
-                baseline: corpus.file_bytes(path),
+                baseline: corpus.range_bytes(path, out.len()),
+                uncapped: corpus.file_bytes(path),
                 drift: out.len() as u64,
                 answered: symbol
                     .signature
@@ -361,7 +403,8 @@ pub fn measure(root: &Path, per_kind: usize) -> Result<Report> {
             let out = corpus.output(&answer, LOOKUP_CAP);
             let first = &index.files[*path].symbols[0].name;
             Measure {
-                baseline: corpus.file_bytes(path),
+                baseline: corpus.understand_bytes(path),
+                uncapped: corpus.file_bytes(path),
                 drift: out.len() as u64,
                 answered: out.contains(first.as_str()),
             }
@@ -385,11 +428,11 @@ pub fn measure(root: &Path, per_kind: usize) -> Result<Report> {
                 .next()
                 .and_then(|file| file.split('.').next())
                 .unwrap_or(path);
-            Measure {
-                baseline: corpus.import_search_bytes(stem),
-                drift: out.len() as u64,
-                answered: out.contains(importer.as_str()),
-            }
+            search_measure(
+                corpus.import_search_bytes(stem),
+                out.len(),
+                out.contains(importer.as_str()),
+            )
         })
         .collect();
     if !measures.is_empty() {
@@ -414,11 +457,11 @@ pub fn measure(root: &Path, per_kind: usize) -> Result<Report> {
                 .next()
                 .and_then(|file| file.split('.').next())
                 .unwrap_or(path);
-            Measure {
-                baseline: corpus.test_search_bytes(stem),
-                drift: out.len() as u64,
-                answered: out.contains(test_path),
-            }
+            search_measure(
+                corpus.test_search_bytes(stem),
+                out.len(),
+                out.contains(test_path),
+            )
         })
         .collect();
     if !measures.is_empty() {
@@ -442,7 +485,9 @@ pub fn measure(root: &Path, per_kind: usize) -> Result<Report> {
                 .min()
                 .unwrap_or(0);
             Measure {
-                baseline: cheapest_search
+                baseline: cheapest_search.min(SEARCH_BYTES)
+                    + corpus.range_bytes(&task.path, read.len()),
+                uncapped: cheapest_search
                     + corpus.lines_bytes(&task.path, task.start, DOC_READ_LINES),
                 drift: (search.len() + read.len()) as u64,
                 answered: search.contains(&pointer),
@@ -458,24 +503,24 @@ pub fn measure(root: &Path, per_kind: usize) -> Result<Report> {
         .map(|(_, symbol)| {
             let answer = lookup::refs(&index, &symbol.name, &corpus.view);
             let out = corpus.output(&answer, LOOKUP_CAP);
-            let grep = corpus.grep_bytes(&symbol.name);
-            Measure {
-                baseline: grep,
-                drift: out.len() as u64,
-                // A definition with no uses is a correct answer, and tells the agent as much.
-                answered: answer.found || out.contains("No references"),
-            }
+            // A definition with no uses is a correct answer, and tells the agent as much.
+            search_measure(
+                corpus.grep_bytes(&symbol.name),
+                out.len(),
+                answer.found || out.contains("No references"),
+            )
         })
         .collect();
     kinds.push(summarize("find uses", &measures));
 
     let answer = overview::map(&index, &corpus.view);
     let out = corpus.output(&answer, BUNDLE_CAP);
-    let baseline: u64 = index.files.keys().map(|path| path.len() as u64 + 1).sum();
+    let listing: u64 = index.files.keys().map(|path| path.len() as u64 + 1).sum();
     kinds.push(summarize(
         "orient in the repo",
         &[Measure {
-            baseline,
+            baseline: listing.min(LISTING_BYTES),
+            uncapped: listing,
             drift: out.len() as u64,
             answered: answer.found,
         }],
@@ -488,6 +533,7 @@ pub fn measure(root: &Path, per_kind: usize) -> Result<Report> {
             task: "total".to_string(),
             tasks: kinds.iter().map(|k| k.tasks).sum(),
             baseline_tokens: baseline,
+            uncapped_tokens: kinds.iter().map(|k| k.uncapped_tokens).sum(),
             drift_tokens: drift,
             saved_percent: saved(baseline, drift),
             answered: kinds.iter().map(|k| k.answered).sum(),
@@ -578,8 +624,14 @@ fn print_table(report: &Report, before: Option<&Report>) {
         }
     }
     println!(
-        "Tokens of tool output without Drift (search capped at {MAX_SEARCH_LINES} lines, or reading the file) and with it. \
-         'right' counts answers containing the result the index expects."
+        "Tokens of tool output without Drift and with it. 'without' uses what agents really print: a search up to about {:.1} KB, a read of about {:.1} KB or what was needed, and the whole file half the time when learning what a file contains. \
+         'right' counts answers containing the result the index expects.",
+        SEARCH_BYTES as f64 / 1000.0,
+        RANGED_READ_BYTES as f64 / 1000.0,
+    );
+    println!(
+        "Full searches ({MAX_SEARCH_LINES} lines) and whole-file reads would come to {} tokens. That's a ceiling agents rarely reach, not a saving.",
+        report.total.uncapped_tokens
     );
 }
 
@@ -626,7 +678,7 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::{saved, spread};
+    use super::{SEARCH_BYTES, saved, search_measure, spread};
 
     #[test]
     fn picks_are_even_and_repeatable() {
@@ -641,5 +693,15 @@ mod tests {
         assert_eq!(saved(1000, 250), 75.0);
         assert_eq!(saved(0, 10), 0.0);
         assert_eq!(saved(100, 200), -100.0);
+    }
+
+    #[test]
+    fn a_search_costs_what_it_prints_up_to_what_agents_really_print() {
+        let long = search_measure(50_000, 100, true);
+        assert_eq!(long.baseline, SEARCH_BYTES);
+        assert_eq!(long.uncapped, 50_000);
+        let short = search_measure(200, 100, true);
+        assert_eq!(short.baseline, 200);
+        assert_eq!(short.uncapped, 200);
     }
 }
