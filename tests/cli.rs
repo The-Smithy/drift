@@ -781,7 +781,35 @@ fn bench_is_repeatable_and_reports_savings() {
         assert!(tasks.contains(&expected), "{tasks:?}");
     }
 
-    fixture.write("before.json", &stdout(&first));
+    // A search costs what agents really print, however much a full grep would.
+    let tokens = |kind: &Value, field: &str| kind[field].as_u64().unwrap();
+    for kind in report["kinds"].as_array().unwrap() {
+        if ["find a definition", "find uses"].contains(&kind["task"].as_str().unwrap()) {
+            assert!(
+                tokens(kind, "baseline_tokens") <= tokens(kind, "tasks") * 1650 / 4,
+                "{kind}"
+            );
+        }
+    }
+    let total = &report["total"];
+    assert!(
+        tokens(total, "baseline_tokens") <= tokens(total, "uncapped_tokens"),
+        "{total}"
+    );
+
+    let table = stdout(&fixture.drift(&["bench", "."]));
+    assert!(table.contains("not a saving"), "{table}");
+
+    // A report saved before `uncapped_tokens` existed can still be compared with.
+    let mut older = report.clone();
+    older["total"]
+        .as_object_mut()
+        .unwrap()
+        .remove("uncapped_tokens");
+    for kind in older["kinds"].as_array_mut().unwrap() {
+        kind.as_object_mut().unwrap().remove("uncapped_tokens");
+    }
+    fixture.write("before.json", &older.to_string());
     let compared = stdout(&fixture.drift(&["bench", ".", "--compare", "before.json"]));
     assert!(compared.contains("vs before"), "{compared}");
 
