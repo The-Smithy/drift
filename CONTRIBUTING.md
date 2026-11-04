@@ -39,7 +39,7 @@ To try it on your own repo, use `drift bench <path>`, with `--json` to save a re
 - **drift** is the output of the matching Drift command, with its default limits.
 - **right** counts answers containing the result the index expects. It catches a limit or ranking change that hides the answer, but because it relies on the index, it can't catch a wrong index. For that, see [Accuracy comes first](#accuracy-comes-first).
 
-If you add a lookup, add a task for it in `src/bench.rs`. Baselines have to be what an agent would really do. Making them larger to improve the score defeats the point.
+If you add a lookup, add a task for it in `src/bench.rs`, and say what it replaces in `src/main.rs` so `drift savings` can count it. Baselines have to be what an agent would really do. Making them larger to improve the score defeats the point.
 
 ## Rules for output
 
@@ -84,6 +84,7 @@ cargo test
 | `src/imports.rs` | Resolving an import to a file |
 | `src/docs.rs` | Searching and listing documents |
 | `src/bench.rs` | The standard benchmark |
+| `src/savings.rs` | The log of lookups and `drift savings` |
 | `src/install.rs` | `install`, including adding the Claude Code hook |
 | `src/hook.rs` | What the hook notices and the notes it gives |
 | `src/model.rs` | The index format |

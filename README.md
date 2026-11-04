@@ -60,11 +60,50 @@ And by task, across all nine:
 | Find in the docs | Grep, then reading 100 lines, since agents mostly read documents in pieces | 17–86% |
 | Orient in the repo | Listing every file | 28–99% |
 
-These count tool output at about 4 bytes per token. The comparison is generous to the alternatives: searches stop at 250 lines and reads at 2,000, as they do in Claude Code. Results vary by repo, so run it on yours:
+These count tool output at about 4 bytes per token, with searches stopped at 250 lines and reads at 2,000, as they are in Claude Code. Results vary by repo, so run it on yours:
 
 ```bash
 drift bench .
 ```
+
+**Real savings are lower than these.** The benchmark compares with the full output of a search or read, and agents often trim theirs. In one developer's recent sessions, name searches printed about 1.6 KB on average. In total that was around 2% of what the benchmark's method estimates for the same searches, and the median search was around 9%. About half of the reads of code files were ranges. `drift savings` estimates from those lower costs instead.
+
+### Your own savings
+
+Each lookup adds one line to a log on your machine, and `drift savings` adds them up:
+
+```console
+$ drift savings
+Last 30 days: 56 lookups in 1 repos
+Drift printed about 11.6K tokens. The usual searches and reads would have printed about 55.0K.
+Estimated saving: about 43.5K tokens (79.0%)
+
+By command:
+  outline      18 uses     2.6K printed    35.5K instead    32.9K saved
+  show          9 uses     4.6K printed     7.7K instead     3.0K saved
+  tests         8 uses     1.4K printed     4.2K instead     2.8K saved
+  query        11 uses      245 printed     2.9K instead     2.6K saved
+  ...
+```
+
+Each lookup is compared with what it most likely replaced, at the average cost of real ones:
+
+| Lookup | Compared with |
+|--------|---------------|
+| `query`, `find`, `docs`, `refs`, `importers`, `tests` | One search of about 1.6 KB, per name for `query` |
+| `outline` | Reading the file: the whole of it half the time, and otherwise about 3.4 KB |
+| `show`, `sig` | Reading about 3.4 KB, or what was printed if that's more |
+| `context` | One such read and two searches |
+| `map`, and `docs` or `tests` with no words | One file listing of about 4.3 KB |
+
+- **It's an estimate.** It can't know what an agent would really have done, or whether it would have needed several searches.
+- **It leans low.** A lookup that finds nothing counts as a cost, and so do the hook's notes. Only `outline` counts a whole file, so `outline` then `show` isn't counted as two full reads. A lookup can count as a loss too: a long `refs` often prints more than a trimmed grep.
+- **It leaves out `drift changes`,** which has no fair comparison, and the tokens the skill and instructions cost.
+- **It's private.** The log holds the time, the repo's name, the command, whether it found anything and two byte counts. It has no search terms, paths or code, and nothing leaves your machine.
+
+Set `DRIFT_NO_SAVINGS=1` to turn logging off. It's also off when `CI` is set. The log stays under about 8 MB.
+
+`drift audit` is the other half: it shows the searches and reads that could have been Drift lookups, which `drift savings` can't see.
 
 **Tested across 27 real repos:** 4,595 files and 924,000 lines, giving 43,604 symbols and 5,101 test cases, indexed in about 2.5 seconds on one Windows machine. Every symbol was checked against its source file, and the name was at the recorded location in all of them.
 
@@ -148,6 +187,7 @@ This adds a skill that agents load when they need it, a short section in `AGENTS
 | `drift map` | Summarize a repo: folders, entry points and most imported files |
 | `drift changes [ref]` | List the definitions changed since a git ref, including uncommitted work |
 | `drift bench [path]` | Measure token savings on a repo with a standard set of tasks |
+| `drift savings` | Estimate the tokens Drift has saved you, from a log kept on your machine. See [Your own savings](#your-own-savings) |
 | `drift audit` | Report where agent tokens went, from your local Claude Code transcripts, and how often Drift was used. Totals only |
 | `drift index [path]` | Build the index yourself. Lookups normally do this on their own |
 | `drift stats` | Show index statistics |
@@ -171,7 +211,7 @@ This adds a skill that agents load when they need it, a short section in `AGENTS
 | `--limit <n>` | Lookups | Show at most this many lines, replacing the default size cap |
 | `--all` | Lookups | Show everything |
 | `--index <file>` | Lookups, `stats` | Use this index file as is, without refreshing it |
-| `--json` | `bench`, `audit` | Print the report as JSON. `bench` can compare a saved report with `--compare` |
+| `--json` | `bench`, `audit`, `savings` | Print the report as JSON. `bench` can compare a saved report with `--compare` |
 | `--compare <file>` | `bench` | Compare with a report saved earlier |
 | `--check <percent>` | `bench` | Fail unless savings reach this percent and 90% of answers are right |
 | `--days <n>` | `audit` | How many days back to look (default: 30) |

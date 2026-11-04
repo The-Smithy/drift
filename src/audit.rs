@@ -527,7 +527,7 @@ fn summarize(seen: Vec<Seen>, days: u64) -> Report {
     }
 }
 
-fn short(tokens: u64) -> String {
+pub(crate) fn short(tokens: u64) -> String {
     match tokens {
         0..1_000 => tokens.to_string(),
         1_000..1_000_000 => format!("{:.1}K", tokens as f64 / 1e3),

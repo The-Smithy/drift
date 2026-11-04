@@ -278,6 +278,10 @@ Schema-qualified SQL names keep their schema, such as `public.users`. To find on
 | Lua | It isn't `local`. Functions on a table count, even a local one |
 | SQL | Always |
 
+## Savings
+
+Each lookup adds a line to a log on this machine, with no search terms, paths or code. `drift savings` is for the user. You don't need to run it, and it isn't a lookup.
+
 ## Update notices
 
 A lookup may print one line to stderr saying a newer release of Drift is available. It appears at most once a day and doesn't affect the answer on stdout. Mention it to the user and carry on. Don't update Drift unless they ask.

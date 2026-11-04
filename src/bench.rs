@@ -13,7 +13,7 @@ use crate::lookup::{self, Answer, BUNDLE_CAP, LOOKUP_CAP, SOURCE_CAP, View, fit,
 use crate::model::{Index, Symbol};
 use crate::overview;
 
-const BYTES_PER_TOKEN: u64 = 4;
+pub(crate) const BYTES_PER_TOKEN: u64 = 4;
 const MIN_ANSWERED_PERCENT: u64 = 90;
 const MAX_SEARCH_LINES: usize = 250;
 const MAX_READ_LINES: usize = 2000;
