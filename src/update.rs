@@ -194,18 +194,20 @@ fn start_background_check() {
 }
 
 fn state_path() -> Option<PathBuf> {
+    Some(cache_dir()?.join("update-check.json"))
+}
+
+/// Where Drift keeps what it remembers between runs.
+pub(crate) fn cache_dir() -> Option<PathBuf> {
     let environment = |name| std::env::var_os(name).filter(|value| !value.is_empty());
-    let base = environment("DRIFT_CACHE_DIR")
+    environment("DRIFT_CACHE_DIR")
         .map(PathBuf::from)
         .or_else(|| {
             environment("LOCALAPPDATA")
                 .or_else(|| environment("XDG_CACHE_HOME"))
                 .map(|dir| PathBuf::from(dir).join("drift"))
         })
-        .or_else(|| {
-            environment("HOME").map(|home| Path::new(&home).join(".cache").join("drift"))
-        })?;
-    Some(base.join("update-check.json"))
+        .or_else(|| environment("HOME").map(|home| Path::new(&home).join(".cache").join("drift")))
 }
 
 fn read_state(path: &Path) -> State {

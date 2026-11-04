@@ -675,7 +675,8 @@ fn reminder_due(session: Option<&str>) -> bool {
     writeln!(file, "{SEARCH_LINE}").is_ok() && earlier % SEARCHES_BETWEEN_REMINDERS == 0
 }
 
-fn note_for(event: &Value) -> Option<String> {
+/// The note for this event, with the name of the repo it's about.
+fn note_for(event: &Value) -> Option<(String, String)> {
     let tool = event["tool_name"].as_str()?;
     if !HOOK_TOOLS.contains(&tool) {
         return None;
@@ -705,14 +706,14 @@ fn note_for(event: &Value) -> Option<String> {
     let session = event["session_id"].as_str();
     if notes.is_empty() {
         let searched = asks.iter().any(|ask| matches!(ask, Ask::Search(_)));
-        return (searched && reminder_due(session)).then(|| REMINDER.to_string());
+        return (searched && reminder_due(session)).then(|| (index.repo, REMINDER.to_string()));
     }
     let notes = new_this_session(session, notes);
     if notes.is_empty() {
         return None;
     }
     let texts: Vec<String> = notes.into_iter().map(|(_, text)| text).collect();
-    Some(texts.join("\n"))
+    Some((index.repo, texts.join("\n")))
 }
 
 // Must never get in the agent's way: any failure here means no note, and the tool runs as normal.
@@ -724,7 +725,8 @@ pub fn run() {
     let Ok(event) = serde_json::from_str::<Value>(&input) else {
         return;
     };
-    if let Some(note) = note_for(&event) {
+    if let Some((repo, note)) = note_for(&event) {
+        crate::savings::record_note(&repo, &note);
         let output = json!({
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",

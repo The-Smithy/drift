@@ -11,6 +11,7 @@ mod install;
 mod lookup;
 mod model;
 mod overview;
+mod savings;
 mod update;
 
 use std::collections::{BTreeMap, HashSet};
@@ -22,8 +23,9 @@ use anyhow::{Result, ensure};
 use clap::{Args, Parser, Subcommand};
 
 use index::{INDEX_FILE, index_repo, load_index, resolve_root, write_index};
-use lookup::{BUNDLE_CAP, LOOKUP_CAP, SOURCE_CAP, View, deliver};
+use lookup::{Answer, BUNDLE_CAP, LOOKUP_CAP, SOURCE_CAP, View, fit};
 use model::Index;
+use savings::Alternative;
 
 #[derive(Parser)]
 #[command(
@@ -211,6 +213,15 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Estimate the tokens Drift has saved, from a log kept on this machine
+    Savings {
+        /// How many days back to look
+        #[arg(long, default_value_t = 30)]
+        days: u64,
+        /// Print the totals as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Show index statistics
     Stats {
         #[command(flatten)]
@@ -281,6 +292,24 @@ fn main() -> Result<()> {
     result
 }
 
+/// Logs what this lookup saved, then prints it. The log comes first, since `drift x | head` can
+/// end the process while it prints.
+fn deliver(
+    index: &Index,
+    command: &str,
+    alternative: Alternative,
+    answer: Answer,
+    view: &View,
+    cap: usize,
+) {
+    let text = fit(&answer.lines, view, cap);
+    savings::record(index, command, alternative, &text, answer.found);
+    print!("{text}");
+    if !answer.found {
+        std::process::exit(1);
+    }
+}
+
 fn run(command: Command) -> Result<()> {
     match command {
         Command::Index {
@@ -292,17 +321,21 @@ fn run(command: Command) -> Result<()> {
         } => cmd_index(&path, output, &ignore_dirs, &ignore_files, compact),
         Command::Query { symbols, args } => {
             let view = args.view();
-            deliver(
-                lookup::query(&args.load()?, &symbols, &view),
-                &view,
-                LOOKUP_CAP,
-            );
+            let index = args.load()?;
+            let answer = lookup::query(&index, &symbols, &view);
+            let alternative = Alternative::Searches(symbols.len() as u64);
+            deliver(&index, "query", alternative, answer, &view, LOOKUP_CAP);
             Ok(())
         }
         Command::Find { words, args } => {
             let view = args.view();
+            let index = args.load()?;
+            let answer = lookup::find(&index, &words, &view);
             deliver(
-                lookup::find(&args.load()?, &words, &view),
+                &index,
+                "find",
+                Alternative::Searches(1),
+                answer,
                 &view,
                 LOOKUP_CAP,
             );
@@ -310,13 +343,25 @@ fn run(command: Command) -> Result<()> {
         }
         Command::Docs { words, args } => {
             let view = args.view();
-            deliver(docs::docs(&args.load()?, &words, &view), &view, LOOKUP_CAP);
+            let index = args.load()?;
+            let answer = docs::docs(&index, &words, &view);
+            let alternative = if words.is_empty() {
+                Alternative::Listing
+            } else {
+                Alternative::Searches(1)
+            };
+            deliver(&index, "docs", alternative, answer, &view, LOOKUP_CAP);
             Ok(())
         }
         Command::Show { symbol, args } => {
             let view = args.view();
+            let index = args.load()?;
+            let answer = lookup::show(&index, &symbol, &view);
             deliver(
-                lookup::show(&args.load()?, &symbol, &view),
+                &index,
+                "show",
+                Alternative::ReadRange,
+                answer,
                 &view,
                 SOURCE_CAP,
             );
@@ -324,8 +369,13 @@ fn run(command: Command) -> Result<()> {
         }
         Command::Sig { symbols, args } => {
             let view = args.view();
+            let index = args.load()?;
+            let answer = lookup::sig(&index, &symbols, &view);
             deliver(
-                lookup::sig(&args.load()?, &symbols, &view),
+                &index,
+                "sig",
+                Alternative::ReadRanges,
+                answer,
                 &view,
                 LOOKUP_CAP,
             );
@@ -333,8 +383,13 @@ fn run(command: Command) -> Result<()> {
         }
         Command::Outline { file, sig, args } => {
             let view = args.view();
+            let index = args.load()?;
+            let answer = lookup::outline(&index, &file, sig);
             deliver(
-                lookup::outline(&args.load()?, &file, sig),
+                &index,
+                "outline",
+                Alternative::ReadFile,
+                answer,
                 &view,
                 LOOKUP_CAP,
             );
@@ -342,8 +397,13 @@ fn run(command: Command) -> Result<()> {
         }
         Command::Refs { symbol, args } => {
             let view = args.view();
+            let index = args.load()?;
+            let answer = lookup::refs(&index, &symbol, &view);
             deliver(
-                lookup::refs(&args.load()?, &symbol, &view),
+                &index,
+                "refs",
+                Alternative::Searches(1),
+                answer,
                 &view,
                 LOOKUP_CAP,
             );
@@ -356,17 +416,27 @@ fn run(command: Command) -> Result<()> {
         } => {
             let view = args.view();
             let index = args.load()?;
+            let alternative = if for_file.is_none() && pattern.is_none() {
+                Alternative::Listing
+            } else {
+                Alternative::Searches(1)
+            };
             let answer = match for_file {
                 Some(file) => lookup::tests_for(&index, &file),
                 None => lookup::tests(&index, pattern.as_deref(), &view),
             };
-            deliver(answer, &view, LOOKUP_CAP);
+            deliver(&index, "tests", alternative, answer, &view, LOOKUP_CAP);
             Ok(())
         }
         Command::Importers { module, args } => {
             let view = args.view();
+            let index = args.load()?;
+            let answer = lookup::importers(&index, &module, &view);
             deliver(
-                lookup::importers(&args.load()?, &module, &view),
+                &index,
+                "importers",
+                Alternative::Searches(1),
+                answer,
                 &view,
                 LOOKUP_CAP,
             );
@@ -374,22 +444,39 @@ fn run(command: Command) -> Result<()> {
         }
         Command::Context { target, args } => {
             let view = args.view();
+            let index = args.load()?;
+            let answer = lookup::context(&index, &target, &view);
+            // It answers what reading the code, then searching for its uses and tests, would.
+            let alternative = Alternative::RangeAndSearch(2);
+            deliver(&index, "context", alternative, answer, &view, BUNDLE_CAP);
+            Ok(())
+        }
+        Command::Map { args } => {
+            let view = args.view();
+            let index = args.load()?;
+            let answer = overview::map(&index, &view);
             deliver(
-                lookup::context(&args.load()?, &target, &view),
+                &index,
+                "map",
+                Alternative::Listing,
+                answer,
                 &view,
                 BUNDLE_CAP,
             );
             Ok(())
         }
-        Command::Map { args } => {
-            let view = args.view();
-            deliver(overview::map(&args.load()?, &view), &view, BUNDLE_CAP);
-            Ok(())
-        }
         Command::Changes { reference, args } => {
             let view = args.view();
-            let answer = overview::changes(&args.load()?, reference.as_deref(), &view)?;
-            deliver(answer, &view, LOOKUP_CAP);
+            let index = args.load()?;
+            let answer = overview::changes(&index, reference.as_deref(), &view)?;
+            deliver(
+                &index,
+                "changes",
+                Alternative::Unmeasured,
+                answer,
+                &view,
+                LOOKUP_CAP,
+            );
             Ok(())
         }
         Command::Bench {
@@ -405,6 +492,7 @@ fn run(command: Command) -> Result<()> {
             dir,
             json,
         } => audit::run(days, project.as_deref(), dir.as_deref(), json),
+        Command::Savings { days, json } => savings::run(days, json),
         Command::Stats { args } => cmd_stats(&args.load()?),
         Command::Batch {
             parent,

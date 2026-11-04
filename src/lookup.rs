@@ -96,13 +96,6 @@ pub fn fit(lines: &[String], view: &View, cap: usize) -> String {
     out
 }
 
-pub fn deliver(answer: Answer, view: &View, cap: usize) {
-    print!("{}", fit(&answer.lines, view, cap));
-    if !answer.found {
-        std::process::exit(1);
-    }
-}
-
 // Source first, then tests, then code an agent rarely means: fixtures, generated files, migrations.
 pub fn path_tier(path: &str) -> u8 {
     let lowered = path.to_lowercase();

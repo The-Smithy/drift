@@ -27,6 +27,7 @@ impl Fixture {
             .args(args)
             .current_dir(&self.root)
             .env("DRIFT_NO_UPDATE_CHECK", "1")
+            .env("DRIFT_NO_SAVINGS", "1")
             .output()
             .unwrap()
     }
@@ -460,6 +461,7 @@ fn lookups_work_from_a_subfolder() {
         .args(["query", "verifyToken"])
         .current_dir(fixture.root.join("src"))
         .env("DRIFT_NO_UPDATE_CHECK", "1")
+        .env("DRIFT_NO_SAVINGS", "1")
         .output()
         .unwrap();
     assert!(
@@ -518,6 +520,7 @@ fn a_closed_pipe_is_not_a_crash() {
         .args(["query", "handler", "--all"])
         .current_dir(&fixture.root)
         .env("DRIFT_NO_UPDATE_CHECK", "1")
+        .env("DRIFT_NO_SAVINGS", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -802,6 +805,7 @@ fn run_hook(fixture: &Fixture, event: Value) -> String {
     use std::process::Stdio;
     let mut child = Command::new(env!("CARGO_BIN_EXE_drift"))
         .arg("hook")
+        .env("DRIFT_NO_SAVINGS", "1")
         .current_dir(&fixture.root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1030,6 +1034,122 @@ fn hook_reminds_an_agent_that_keeps_searching_for_text() {
     }
     assert!(run_hook(&fixture, event).contains("this repo is indexed"));
     let _ = std::fs::remove_file(std::env::temp_dir().join("drift-hook").join(session));
+}
+
+#[test]
+fn savings_are_logged_as_lookups_run_and_reported() {
+    let fixture = feature_fixture("savings");
+    assert!(fixture.drift(&["index", ".", "--compact"]).status.success());
+    let cache = fixture.root.join("savings-cache");
+    let drift = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_drift"))
+            .args(args)
+            .current_dir(&fixture.root)
+            .env("DRIFT_NO_UPDATE_CHECK", "1")
+            .env("DRIFT_CACHE_DIR", &cache)
+            .env_remove("DRIFT_NO_SAVINGS")
+            .env_remove("CI")
+            .output()
+            .unwrap()
+    };
+
+    for args in [
+        &["init", "-q"][..],
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.com",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "x",
+        ],
+    ] {
+        let git = Command::new("git")
+            .args(args)
+            .current_dir(&fixture.root)
+            .output()
+            .unwrap();
+        assert!(git.status.success());
+    }
+
+    let empty = stdout(&drift(&["savings"]));
+    assert!(empty.contains("No lookups recorded"), "{empty}");
+
+    let found = drift(&["query", "verifyToken"]);
+    assert!(found.status.success());
+    assert!(stdout(&found).contains("src/auth.ts"));
+    assert!(drift(&["show", "verifyToken"]).status.success());
+    assert!(!drift(&["query", "noSuchNameAnywhere"]).status.success());
+    assert!(drift(&["changes"]).status.success());
+
+    let mut hook = Command::new(env!("CARGO_BIN_EXE_drift"))
+        .arg("hook")
+        .current_dir(&fixture.root)
+        .env("DRIFT_CACHE_DIR", &cache)
+        .env_remove("DRIFT_NO_SAVINGS")
+        .env_remove("CI")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let event = serde_json::json!({
+        "tool_name": "Grep",
+        "cwd": fixture.root.to_string_lossy(),
+        "tool_input": { "pattern": "verifyToken" },
+    });
+    std::io::Write::write_all(
+        &mut hook.stdin.take().unwrap(),
+        event.to_string().as_bytes(),
+    )
+    .unwrap();
+    assert!(hook.wait().unwrap().success());
+
+    let log = std::fs::read_to_string(cache.join("savings.jsonl")).unwrap();
+    assert_eq!(log.lines().count(), 5);
+    assert!(log.contains("hook note"), "{log}");
+    assert!(
+        !log.contains("verifyToken"),
+        "the log holds no search terms: {log}"
+    );
+    assert!(
+        !log.contains("src/auth.ts"),
+        "the log holds no paths: {log}"
+    );
+
+    let text = stdout(&drift(&["savings"]));
+    assert!(text.contains("4 lookups in 1 repos"), "{text}");
+    assert!(text.contains("Estimated saving"), "{text}");
+    assert!(text.contains("1 lookups found nothing"), "{text}");
+    assert!(text.contains("drift changes"), "{text}");
+    assert!(text.contains("This is an estimate"), "{text}");
+
+    let report: Value = serde_json::from_str(&stdout(&drift(&["savings", "--json"]))).unwrap();
+    assert_eq!(report["total"]["lookups"], 4);
+    assert_eq!(report["failed_lookups"], 1);
+    assert_eq!(report["not_measured"], 1);
+    let commands = report["by_command"].as_array().unwrap();
+    assert!(commands.iter().any(|row| row["name"] == "show"));
+}
+
+#[test]
+fn savings_can_be_turned_off() {
+    let fixture = feature_fixture("savings-off");
+    assert!(fixture.drift(&["index", ".", "--compact"]).status.success());
+    let cache = fixture.root.join("savings-cache");
+    let output = Command::new(env!("CARGO_BIN_EXE_drift"))
+        .args(["query", "verifyToken"])
+        .current_dir(&fixture.root)
+        .env("DRIFT_NO_UPDATE_CHECK", "1")
+        .env("DRIFT_CACHE_DIR", &cache)
+        .env("DRIFT_NO_SAVINGS", "1")
+        .env_remove("CI")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(!cache.join("savings.jsonl").exists());
 }
 
 #[test]
@@ -1298,10 +1418,13 @@ impl UpdateFixture {
             .current_dir(&self.fixture.root)
             .env_remove("CI")
             .env_remove("DRIFT_NO_UPDATE_CHECK")
+            .env("DRIFT_NO_SAVINGS", "1")
             .env("DRIFT_CACHE_DIR", &self.cache)
             .env("DRIFT_UPDATE_REMOTE", self.fixture.root.join("remote"));
         if !enabled {
-            command.env("DRIFT_NO_UPDATE_CHECK", "1");
+            command
+                .env("DRIFT_NO_UPDATE_CHECK", "1")
+                .env("DRIFT_NO_SAVINGS", "1");
         }
         command.output().unwrap()
     }
