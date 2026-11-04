@@ -2,6 +2,7 @@
 mod allocator;
 mod audit;
 mod bench;
+mod docs;
 mod extract;
 mod imports;
 mod index;
@@ -101,9 +102,16 @@ enum Command {
         #[command(flatten)]
         args: LookupArgs,
     },
+    /// Search documents by what they say, or list them with no words
+    Docs {
+        /// Words to look for, in any order, such as: how do refunds work
+        words: Vec<String>,
+        #[command(flatten)]
+        args: LookupArgs,
+    },
     /// Print a definition's source
     Show {
-        /// A name, Parent.name or path:name
+        /// A name, Parent.name, path:name, path:line or path:start-end
         symbol: String,
         #[command(flatten)]
         args: LookupArgs,
@@ -297,6 +305,11 @@ fn run(command: Command) -> Result<()> {
                 &view,
                 LOOKUP_CAP,
             );
+            Ok(())
+        }
+        Command::Docs { words, args } => {
+            let view = args.view();
+            deliver(docs::docs(&args.load()?, &words, &view), &view, LOOKUP_CAP);
             Ok(())
         }
         Command::Show { symbol, args } => {

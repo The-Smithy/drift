@@ -4,11 +4,13 @@ mod data;
 mod gdscript;
 mod lua;
 mod markdown;
+pub mod prose;
 mod python;
 mod rust;
 mod sql;
 mod typescript;
 
+pub use markdown::clean_title;
 pub use rust::split_top_level;
 use tree_sitter::{Language, Node, Parser, Tree};
 
@@ -43,6 +45,10 @@ pub fn is_supported(extension: &str) -> bool {
             | "md"
             | "mdx"
             | "markdown"
+            | "rst"
+            | "adoc"
+            | "asciidoc"
+            | "txt"
             | "json"
             | "jsonc"
             | "yaml"
@@ -84,6 +90,9 @@ pub fn extract(extension: &str, source: &str) -> Option<Extracted> {
         "rs" => rust::extract(source),
         "sql" => Some(sql::extract(source)),
         "md" | "mdx" | "markdown" => Some(markdown::extract(source)),
+        "rst" => Some(prose::extract_rst(source)),
+        "adoc" | "asciidoc" => Some(prose::extract_adoc(source)),
+        "txt" => Some(prose::extract_text(source)),
         "json" | "jsonc" => data::extract_json(source),
         "yaml" | "yml" => data::extract_yaml(source),
         "lua" => lua::extract(source),
@@ -355,6 +364,10 @@ pub fn is_data_file(file: &str) -> bool {
         ".md",
         ".mdx",
         ".markdown",
+        ".rst",
+        ".adoc",
+        ".asciidoc",
+        ".txt",
         ".json",
         ".jsonc",
         ".yaml",
@@ -364,10 +377,71 @@ pub fn is_data_file(file: &str) -> bool {
     .any(|extension| file.ends_with(extension))
 }
 
+pub fn is_doc_language(lang: &str) -> bool {
+    matches!(lang, "markdown" | "rst" | "asciidoc" | "text")
+}
+
+/// Most `.txt` files are data: test input, word lists, dependency lists. Only those somewhere
+/// documents are kept are worth indexing.
+pub fn is_wanted_text(relative: &str) -> bool {
+    let lowered = relative.to_lowercase();
+    let mut segments = lowered.split('/');
+    let file = segments.next_back().unwrap_or("");
+    let stem = file.split('.').next().unwrap_or("");
+    const NOT_DOCUMENTS: &[&str] = &[
+        "cmakelists",
+        "robots",
+        "license",
+        "licence",
+        "copying",
+        "notice",
+        "authors",
+        "contributors",
+        "top_level",
+        "sources",
+        "dependency_links",
+    ];
+    if NOT_DOCUMENTS.contains(&stem)
+        || stem.starts_with("requirements")
+        || stem.starts_with("constraints")
+    {
+        return false;
+    }
+    const DOCUMENT_FOLDERS: &[&str] = &[
+        "doc",
+        "docs",
+        "documentation",
+        "notes",
+        "wiki",
+        "guide",
+        "guides",
+        "manual",
+        "spec",
+        "specs",
+        "rfc",
+        "rfcs",
+        "adr",
+        "adrs",
+        "design",
+    ];
+    let directories: Vec<&str> = segments.collect();
+    directories.is_empty() || directories.iter().any(|d| DOCUMENT_FOLDERS.contains(d))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{extract, reference_lines};
+    use super::{extract, is_wanted_text, reference_lines};
     use crate::model::Symbol;
+
+    #[test]
+    fn only_text_files_kept_as_documents_count() {
+        assert!(is_wanted_text("notes.txt"));
+        assert!(is_wanted_text("docs/guide/setup.txt"));
+        assert!(!is_wanted_text("tests/data/input.txt"));
+        assert!(!is_wanted_text("requirements-dev.txt"));
+        assert!(!is_wanted_text("docs/CMakeLists.txt"));
+        assert!(!is_wanted_text("LICENSE.txt"));
+    }
 
     fn find<'a>(symbols: &'a [Symbol], name: &str) -> &'a Symbol {
         symbols

@@ -82,6 +82,7 @@ cargo test
 | `src/lookup.rs` | Lookups: `query`, `find`, `show`, `sig`, `outline`, `refs`, `tests`, `importers`, `context` |
 | `src/overview.rs` | `map`, `changes` and the import graph |
 | `src/imports.rs` | Resolving an import to a file |
+| `src/docs.rs` | Searching and listing documents |
 | `src/bench.rs` | The standard benchmark |
 | `src/install.rs` | `install` and the Claude Code hook |
 | `src/model.rs` | The index format |

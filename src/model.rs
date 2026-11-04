@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-pub const SCHEMA_VERSION: &str = "1.4";
+pub const SCHEMA_VERSION: &str = "1.5";
 
 fn default_true() -> bool {
     true

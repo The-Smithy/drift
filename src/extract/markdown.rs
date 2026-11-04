@@ -1,19 +1,20 @@
-//! Markdown headings, so an agent can read one section of a long document.
+//! Markdown headings, so an agent can read one section of a long document, and the symbols every
+//! kind of document turns into.
 
 use std::sync::LazyLock;
 
 use regex::Regex;
 
-use super::{Extracted, MAX_SIGNATURE, line_count, truncate};
+use super::{Extracted, MAX_SIGNATURE, line_count, prose, truncate};
 use crate::model::Symbol;
 
 static LINK: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"!?\[([^\]]*)\]\([^)]*\)").expect("valid regex"));
 
-struct Heading {
-    level: usize,
-    title: String,
-    line: u32,
+pub(super) struct Heading {
+    pub(super) level: usize,
+    pub(super) title: String,
+    pub(super) line: u32,
 }
 
 // Up to three spaces of indent is still a heading or fence; four or more is a code block.
@@ -22,7 +23,7 @@ fn unindented(line: &str) -> Option<&str> {
     (line.len() - body.len() <= 3).then_some(body)
 }
 
-fn clean_title(raw: &str) -> String {
+pub fn clean_title(raw: &str) -> String {
     let linked = LINK.replace_all(raw, "$1");
     linked
         .replace(['`', '*'], "")
@@ -156,6 +157,22 @@ fn headings(source: &str) -> Vec<Heading> {
 }
 
 pub fn extract(source: &str) -> Extracted {
+    let all_lines: Vec<&str> = source.lines().collect();
+    document(
+        "markdown",
+        source,
+        headings(source),
+        skip_front_matter(&all_lines),
+    )
+}
+
+// Sections under headings, or pieces named after their first line if there are no headings.
+pub(super) fn document(
+    lang: &'static str,
+    source: &str,
+    found: Vec<Heading>,
+    body_start: usize,
+) -> Extracted {
     let lines = line_count(source);
     let last_with_text = source
         .lines()
@@ -165,7 +182,17 @@ pub fn extract(source: &str) -> Extracted {
         .last()
         .unwrap_or(lines);
 
-    let found = headings(source);
+    if found.is_empty() {
+        let all_lines: Vec<&str> = source.lines().collect();
+        return Extracted {
+            lang,
+            lines,
+            symbols: prose::section_symbols(&all_lines, body_start),
+            imports: Vec::new(),
+            tests: None,
+        };
+    }
+
     let symbols = found
         .iter()
         .enumerate()
@@ -199,7 +226,7 @@ pub fn extract(source: &str) -> Extracted {
         .collect();
 
     Extracted {
-        lang: "markdown",
+        lang,
         lines,
         symbols,
         imports: Vec::new(),
@@ -280,5 +307,14 @@ mod tests {
         let found = outline("# A\r\ntext\r\n## B\r\n");
         assert_eq!(found[1].0, "B");
         assert!(outline("").is_empty());
+    }
+
+    #[test]
+    fn a_document_with_no_headings_gets_sections() {
+        let found = extract("---\ntitle: x\n---\nJust some text here.\nAnd more.\n").symbols;
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].kind, "section");
+        assert_eq!(found[0].name, "Just some text here.");
+        assert_eq!((found[0].line, found[0].end_line), (4, Some(5)));
     }
 }

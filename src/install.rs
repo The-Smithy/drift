@@ -320,7 +320,8 @@ fn search_note(index: &Index, name: &str) -> Option<String> {
             file.symbols
                 .iter()
                 .filter(|symbol| {
-                    symbol.name == name && !matches!(symbol.kind.as_str(), "heading" | "key")
+                    symbol.name == name
+                        && !matches!(symbol.kind.as_str(), "heading" | "key" | "section")
                 })
                 .map(move |symbol| format!("{path}:{}", symbol.line))
         })

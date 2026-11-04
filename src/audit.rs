@@ -80,6 +80,7 @@ impl Totals {
 const DRIFT_LOOKUPS: &[&str] = &[
     "query",
     "find",
+    "docs",
     "show",
     "sig",
     "outline",
@@ -250,7 +251,8 @@ fn is_code_path(path: &str) -> bool {
     Path::new(unquote(path))
         .extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(is_supported)
+        // Plain text is only sometimes a document, so reading one isn't clearly a waste.
+        .is_some_and(|extension| is_supported(extension) && extension != "txt")
 }
 
 fn searched_for_a_name(words: &[&str]) -> bool {
