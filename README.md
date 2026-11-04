@@ -36,15 +36,15 @@ class UserController  src/controllers/user.ts:12-140 (exported)
 
 | Repo | Language | Tokens without Drift | Tokens with Drift | Saved |
 |------|----------|----------------------|-------------------|-------|
-| [flask](https://github.com/pallets/flask) | Python | 197,293 | 9,893 | 95.0% |
-| [express](https://github.com/expressjs/express) | JavaScript | 48,805 | 2,960 | 93.9% |
-| [ripgrep](https://github.com/BurntSushi/ripgrep) | Rust | 302,231 | 11,512 | 96.2% |
-| [vue core](https://github.com/vuejs/core) | TypeScript | 167,096 | 10,500 | 93.7% |
-| [godot-open-rpg](https://github.com/gdquest-demos/godot-open-rpg) | GDScript | 55,896 | 5,349 | 90.4% |
-| [plenary.nvim](https://github.com/nvim-lua/plenary.nvim) | Lua | 69,550 | 4,624 | 93.4% |
-| [jq](https://github.com/jqlang/jq) | C | 237,047 | 6,490 | 97.3% |
-| [leveldb](https://github.com/google/leveldb) | C++ | 151,897 | 13,617 | 91.0% |
-| [serilog](https://github.com/serilog/serilog) | C# | 184,994 | 17,959 | 90.3% |
+| [flask](https://github.com/pallets/flask) | Python | 216,378 | 15,958 | 92.6% |
+| [express](https://github.com/expressjs/express) | JavaScript | 57,766 | 5,455 | 90.6% |
+| [ripgrep](https://github.com/BurntSushi/ripgrep) | Rust | 312,529 | 16,922 | 94.6% |
+| [vue core](https://github.com/vuejs/core) | TypeScript | 197,857 | 14,791 | 92.5% |
+| [godot-open-rpg](https://github.com/gdquest-demos/godot-open-rpg) | GDScript | 57,906 | 6,718 | 88.4% |
+| [plenary.nvim](https://github.com/nvim-lua/plenary.nvim) | Lua | 76,019 | 7,761 | 89.8% |
+| [jq](https://github.com/jqlang/jq) | C | 239,192 | 7,460 | 96.9% |
+| [leveldb](https://github.com/google/leveldb) | C++ | 160,215 | 16,590 | 89.6% |
+| [serilog](https://github.com/serilog/serilog) | C# | 194,515 | 25,895 | 86.7% |
 
 And by task, across all nine:
 
@@ -57,6 +57,7 @@ And by task, across all nine:
 | Find a file's tests | Grep | 80–99% |
 | Find uses | Grep | 26–83% |
 | Find importers | Grep | 67–97% |
+| Find in the docs | Grep, then reading 100 lines, since agents mostly read documents in pieces | 17–86% |
 | Orient in the repo | Listing every file | 28–99% |
 
 These count tool output at about 4 bytes per token. The comparison is generous to the alternatives: searches stop at 250 lines and reads at 2,000, as they do in Claude Code. Results vary by repo, so run it on yours:
@@ -135,7 +136,8 @@ This adds a skill that agents load when they need it, a short section in `AGENTS
 |---------|-------------|
 | `drift query <symbol>...` | Find where symbols are defined. Exact names match first, then case-insensitive substrings |
 | `drift find <words>...` | Search names, doc comments and paths by words in any order, so `rate limit` finds `enforceRateLimit` |
-| `drift show <symbol>` | Print one definition's source. Takes a name, `Parent.name`, `Parent::name`, `path:name` or `path:line` |
+| `drift docs [words]...` | Find the sections of your documents that cover something, ranked, as pointers rather than text. With no words, list the documents |
+| `drift show <symbol>` | Print one definition's source. Takes a name, `Parent.name`, `Parent::name`, `path:name`, `path:line` or a range of lines, `path:start-end` |
 | `drift sig <symbol>...` | Print only a definition's signature and doc comment |
 | `drift outline <file>` | List a file's definitions with line ranges, and its imports. Add `--sig` for signatures |
 | `drift refs <symbol>` | Find uses, by file and enclosing definition, leaving out comments, strings and imports. Matches by name, not by type |
@@ -193,6 +195,9 @@ Lookups stop at a size cap, 4 KB for most and 12 KB for `show`, and say how much
 | **GDScript** | `.gd` | classes, functions, signals, enums, constants, variables |
 | **Lua** | `.lua` | functions, table functions and methods, constants, tables |
 | **Markdown** | `.md`, `.mdx`, `.markdown` | headings, each with the line range of its section |
+| **reStructuredText** | `.rst` | headings, each with the line range of its section |
+| **AsciiDoc** | `.adoc`, `.asciidoc` | headings, each with the line range of its section |
+| **Plain text** | `.txt` in the repo root or in folders such as `docs`, `notes` and `specs` | sections split at paragraph breaks. Lists and other files that aren't sentences are left out of searches |
 | **JSON** | `.json`, `.jsonc` | keys, two levels deep |
 | **YAML** | `.yaml`, `.yml` | keys, two levels deep |
 
@@ -212,7 +217,9 @@ A JS or TS test file that names no framework takes one from the nearest `package
 
 ## How It Works
 
-Drift walks your repo in parallel and parses each file with [tree-sitter](https://tree-sitter.github.io/). Parsing rather than pattern matching means commented-out code and code inside strings are not mistaken for definitions. SQL is the exception: dialects vary too much for one grammar, so `CREATE` statements are matched by pattern, with comments removed first. Markdown is also read without a grammar, and skips code blocks, comments and front matter. JSON and YAML keys, like Markdown headings, rank below code.
+Drift walks your repo in parallel and parses each file with [tree-sitter](https://tree-sitter.github.io/). Parsing rather than pattern matching means commented-out code and code inside strings are not mistaken for definitions. SQL is the exception: dialects vary too much for one grammar, so `CREATE` statements are matched by pattern, with comments removed first. Documents are also read without a grammar, skipping Markdown's code blocks, comments and front matter. JSON and YAML keys, like headings, rank below code.
+
+Document text isn't stored in the index, which every lookup has to load. `drift docs` reads it when you search, and ranks sections with [BM25](https://en.wikipedia.org/wiki/Okapi_BM25), counting words in headings and file names for more. It took about 60 ms a search on 442 documents.
 
 For each file it records:
 
@@ -229,6 +236,8 @@ For each file it records:
 - C and C++ code that only exists after the preprocessor runs. Export macros and Unreal's macros are handled, but unusual macros can hide a definition. In testing, jq lost 7 of 662 functions this way.
 - Which C# file a `using` refers to, because it names a namespace. `drift importers App.Core` searches them as text, and `drift tests --for` also matches test files named after the source file, such as `ServiceTests.cs`.
 - JSON and YAML keys past two levels, or past 300 in one file.
+- Meanings in documents. `drift docs` matches words and their forms, so `expires` won't find a section that only says `lifetime`. It says which words each result lacks, and an agent can try others.
+- Documentation inside dependencies, since `node_modules` and similar folders are skipped.
 - Non-test items inside Rust `#[cfg(test)]` modules, which are left out to keep the index small.
 - Declarations caught up in syntax the grammar can't read. About 0.5% of files had some in testing. Those files are still indexed, and declarations elsewhere in them are still found.
 

@@ -6,6 +6,8 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::docs;
+use crate::extract::is_doc_language;
 use crate::index::{index_repo, read_source, resolve_root};
 use crate::lookup::{self, Answer, BUNDLE_CAP, LOOKUP_CAP, SOURCE_CAP, View, fit, path_tier};
 use crate::model::{Index, Symbol};
@@ -15,6 +17,9 @@ const BYTES_PER_TOKEN: u64 = 4;
 const MIN_ANSWERED_PERCENT: u64 = 90;
 const MAX_SEARCH_LINES: usize = 250;
 const MAX_READ_LINES: usize = 2000;
+// Agents mostly read documents in pieces, so that's the fair comparison, not reading the whole file.
+const DOC_READ_LINES: usize = 100;
+const DOC_QUERY_WORDS: usize = 3;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct KindReport {
@@ -46,7 +51,76 @@ struct Measure {
 
 struct Corpus<'a> {
     sources: BTreeMap<&'a str, String>,
+    doc_paths: Vec<&'a str>,
     view: View,
+}
+
+struct DocTask {
+    path: String,
+    start: u32,
+    end: u32,
+    words: Vec<String>,
+}
+
+// Words from a section's first sentence stand in for what an agent would ask about it. They come
+// from the text and not the heading, so a search has to do more than match the title.
+fn question_for(lines: &[&str]) -> Option<Vec<String>> {
+    let mut in_code = false;
+    for line in lines.iter().skip(1) {
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_code = !in_code;
+            continue;
+        }
+        if in_code || line.starts_with("    ") {
+            continue;
+        }
+        let words: Vec<String> = trimmed
+            .split(|c: char| !c.is_alphabetic())
+            .filter(|word| word.len() >= 4)
+            .map(str::to_lowercase)
+            .filter(|word| !docs::is_stop_word(word))
+            .take(DOC_QUERY_WORDS)
+            .collect();
+        if words.len() == DOC_QUERY_WORDS {
+            return Some(words);
+        }
+    }
+    None
+}
+
+fn doc_tasks(index: &Index, corpus: &Corpus, count: usize) -> Vec<DocTask> {
+    let mut tasks = Vec::new();
+    for path in &corpus.doc_paths {
+        let (Some(source), Some(file)) = (corpus.sources.get(path), index.files.get(*path)) else {
+            continue;
+        };
+        if docs::doc_weight(path) < 1.0 {
+            continue;
+        }
+        let lines: Vec<&str> = source.lines().collect();
+        for section in docs::sections(file, &lines) {
+            if section.end < section.start + 3 {
+                continue;
+            }
+            let body = &lines[section.start as usize - 1..(section.end as usize).min(lines.len())];
+            if let Some(words) = question_for(body) {
+                tasks.push(DocTask {
+                    path: (*path).to_string(),
+                    start: section.start,
+                    end: section.end,
+                    words,
+                });
+            }
+        }
+    }
+    (0..count.min(tasks.len()))
+        .map(|i| i * tasks.len() / count.min(tasks.len()))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|at| tasks.swap_remove(at))
+        .collect()
 }
 
 impl Corpus<'_> {
@@ -106,6 +180,25 @@ impl Corpus<'_> {
             source
                 .lines()
                 .take(MAX_READ_LINES)
+                .map(|line| line.len() as u64 + 1)
+                .sum()
+        })
+    }
+
+    fn doc_search_bytes(&self, word: &str) -> u64 {
+        let wanted = word.to_lowercase();
+        self.search_bytes(
+            |path| self.doc_paths.contains(&path),
+            |line| line.to_lowercase().contains(&wanted),
+        )
+    }
+
+    fn lines_bytes(&self, path: &str, start: u32, count: usize) -> u64 {
+        self.sources.get(path).map_or(0, |source| {
+            source
+                .lines()
+                .skip(start as usize - 1)
+                .take(count)
                 .map(|line| line.len() as u64 + 1)
                 .sum()
         })
@@ -174,8 +267,15 @@ pub fn measure(root: &Path, per_kind: usize) -> Result<Report> {
             sources.insert(path.as_str(), source);
         }
     }
+    let doc_paths: Vec<&str> = index
+        .files
+        .iter()
+        .filter(|(_, file)| is_doc_language(&file.lang))
+        .map(|(path, _)| path.as_str())
+        .collect();
     let corpus = Corpus {
         sources,
+        doc_paths,
         view: View::default(),
     };
 
@@ -323,6 +423,34 @@ pub fn measure(root: &Path, per_kind: usize) -> Result<Report> {
         .collect();
     if !measures.is_empty() {
         kinds.push(summarize("find a file's tests", &measures));
+    }
+
+    let measures: Vec<Measure> = doc_tasks(&index, &corpus, per_kind)
+        .iter()
+        .map(|task| {
+            let answer = docs::docs(&index, &task.words, &corpus.view);
+            let search = corpus.output(&answer, LOOKUP_CAP);
+            let pointer = format!("{}:{}-{}", task.path, task.start, task.end);
+            let read = lookup::show(&index, &pointer, &corpus.view);
+            let read = corpus.output(&read, SOURCE_CAP);
+            // An agent searches for the most specific word it has, then reads from where it landed.
+            let cheapest_search = task
+                .words
+                .iter()
+                .map(|word| corpus.doc_search_bytes(word))
+                .filter(|bytes| *bytes > 0)
+                .min()
+                .unwrap_or(0);
+            Measure {
+                baseline: cheapest_search
+                    + corpus.lines_bytes(&task.path, task.start, DOC_READ_LINES),
+                drift: (search.len() + read.len()) as u64,
+                answered: search.contains(&pointer),
+            }
+        })
+        .collect();
+    if !measures.is_empty() {
+        kinds.push(summarize("find in the docs", &measures));
     }
 
     let measures: Vec<Measure> = picked

@@ -14,6 +14,8 @@ You don't need to manage the index. A lookup builds it if it's missing and refre
 |-------------|-----|
 | Find where something is defined | `drift query <symbol>` |
 | Search by words when you don't know the name | `drift find rate limit` |
+| Find the part of the docs that covers something | `drift docs how do refunds work` |
+| See which docs exist | `drift docs` |
 | Read one definition | `drift show <symbol>` |
 | See how to call something | `drift sig <symbol>` |
 | See what a file contains | `drift outline <file>` |
@@ -32,7 +34,7 @@ Every lookup stops at a size cap and ends with a line saying how much was left o
 
 | Commands | Cap |
 |----------|-----|
-| `query`, `find`, `sig`, `outline`, `refs`, `tests`, `importers`, `changes` | 4 KB |
+| `query`, `find`, `docs`, `sig`, `outline`, `refs`, `tests`, `importers`, `changes` | 4 KB |
 | `context`, `map` | 6 KB |
 | `show` | 12 KB |
 
@@ -67,6 +69,29 @@ function enforceRateLimit  src/lib/limits.ts:40-71 (exported)  # Rejects a reque
 
 Words can be in any order. They match whole words in a name first, then word prefixes, then doc comments and file paths. Every word has to match somewhere.
 
+### Searching the docs
+
+```console
+$ drift docs how do refunds work
+docs/billing.md:120-148  Billing > Refunds  (2026-08-01)  # A refund goes back to the original card within five days.
+docs/support.md:40-62  Support > Disputes  (2025-03-14)  [no refunds]  # When a customer disputes a charge, the work starts here.
+Read one with: drift show <path:start-end>
+```
+
+Each line is one section: where it is, its heading, when the file last changed, and the line that best matches. Then read just that section with `drift show docs/billing.md:120-148`.
+
+- **It searches what documents say,** not only their headings. Words can be in any order and in any form, so `refunds` also finds `refund` and `refunded`.
+- **Not every word has to match.** `[no refunds]` says which words a section doesn't have, so you can tell a strong match from a weak one.
+- **It matches words, not meanings.** `expires` won't find a section that only says `lifetime`. If a search misses, try other words.
+- **Dates help you weigh old documents.** They come from git, or from the file's timestamp if it isn't committed.
+- **Files without headings work too.** They're split at paragraph breaks, and long sections are split the same way, so a result is never a huge range.
+
+You get up to 8 sections, at most 3 from one file. Changelogs rank low, and license files are left out.
+
+With no words, `drift docs` lists each document with its title and first sentence. If there are more than 30, it counts them by folder instead, and `drift docs --in <folder>` lists one folder.
+
+It covers `.md`, `.mdx`, `.markdown`, `.rst`, `.adoc` and `.asciidoc`, plus `.txt` files in the repo root or in folders such as `docs`, `notes`, `specs` and `wiki`. A `.txt` file that reads like a list rather than sentences is left out of searches.
+
 ### Reading one definition
 
 ```console
@@ -77,7 +102,7 @@ export function verifyToken(token: string): boolean {
 }
 ```
 
-If a name is defined in several places, you get the best match and a list of the others. A definition with a body wins over a one-line declaration in a header. Choose one with `Parent.name`, `Parent::name`, `path:name`, or `path:line` for overloads. These also work with `sig` and `query`.
+If a name is defined in several places, you get the best match and a list of the others. A definition with a body wins over a one-line declaration in a header. Choose one with `Parent.name`, `Parent::name`, `path:name`, or `path:line` for overloads. These also work with `sig` and `query`. `show` also takes a range of lines, as in `path:120-148`.
 
 ### Seeing how to call something
 
@@ -231,7 +256,8 @@ This lists the definitions touched since a git ref, or since `HEAD` by default, 
 | `property` | C# | Properties |
 | `signal` | GDScript | Signals |
 | `key` | JSON, YAML | A key and its value. Never counted as exported |
-| `heading` | Markdown | A heading and the section under it. Never counted as exported |
+| `heading` | Markdown, reStructuredText, AsciiDoc | A heading and the section under it. Never counted as exported |
+| `section` | Documents with no headings | A run of paragraphs, named after its first line. Shown by `outline` and searched by `docs`, but not by `query` or `find` |
 | `table` | SQL | `CREATE TABLE` |
 | `view` | SQL | `CREATE VIEW`, including materialized views |
 | `procedure` | SQL | `CREATE PROCEDURE` |

@@ -103,7 +103,7 @@ fn full_index_keeps_nulls_and_reports_real_test_counts() {
     );
 
     let index = fixture.index_json();
-    assert_eq!(index["version"], "1.4");
+    assert_eq!(index["version"], "1.5");
     assert_eq!(index["tests"]["a.test.ts"]["framework"], "jest");
 
     let helper = &index["files"]["a.test.ts"]["symbols"][0];
@@ -1500,4 +1500,152 @@ fn csharp_tests_are_found_by_file_name() {
         by_namespace.contains("tests/ServiceTests.cs"),
         "{by_namespace}"
     );
+}
+
+fn docs_fixture(name: &str) -> Fixture {
+    let fixture = Fixture::new(name);
+    fixture.write(
+        "docs/billing.md",
+        "# Billing\n\nHow money moves around here.\n\n## Refunds\n\nA refund goes back to the original card within five days.\n\n## Invoices\n\nInvoices are sent monthly.\n",
+    );
+    fixture.write("docs/setup.md", "# Setup\n\nInstall the tool and run it.\n");
+    fixture.write("CHANGELOG.md", "# 1.0\n\nFixed a refund bug.\n");
+    fixture.write(
+        "LICENSE.md",
+        "Refund nothing. All rights reserved by the authors.\n",
+    );
+    assert!(fixture.drift(&["index", "."]).status.success());
+    fixture
+}
+
+#[test]
+fn docs_points_at_a_section_that_show_can_read() {
+    let fixture = docs_fixture("docs-search");
+    let found = stdout(&fixture.drift(&["docs", "how", "do", "refunds", "work"]));
+    let first = found.lines().next().unwrap();
+    assert!(
+        first.starts_with("docs/billing.md:5-7  Billing > Refunds"),
+        "{found}"
+    );
+    assert!(first.contains("[no work]"), "{found}");
+    assert!(first.contains("original card"), "{found}");
+    assert!(found.contains("drift show"), "{found}");
+    assert!(!found.contains("LICENSE"), "{found}");
+
+    let section = stdout(&fixture.drift(&["show", "docs/billing.md:5-7"]));
+    assert!(section.contains("A refund goes back"), "{section}");
+    assert!(!section.contains("Invoices"), "{section}");
+}
+
+#[test]
+fn docs_reports_a_search_with_no_matches() {
+    let fixture = docs_fixture("docs-miss");
+    let output = fixture.drift(&["docs", "kubernetes"]);
+    assert!(!output.status.success());
+    assert!(stdout(&output).contains("No documents mention 'kubernetes'"));
+}
+
+#[test]
+fn docs_stays_inside_a_folder() {
+    let fixture = docs_fixture("docs-within");
+    let found = stdout(&fixture.drift(&["docs", "refund", "--in", "docs"]));
+    assert!(found.contains("docs/billing.md"), "{found}");
+    assert!(!found.contains("CHANGELOG"), "{found}");
+}
+
+#[test]
+fn docs_with_no_words_lists_documents() {
+    let fixture = docs_fixture("docs-list");
+    let listed = stdout(&fixture.drift(&["docs"]));
+    assert!(
+        listed.contains("# Billing - How money moves around here."),
+        "{listed}"
+    );
+    assert!(listed.contains("docs/setup.md"), "{listed}");
+    assert!(!listed.contains("LICENSE"), "{listed}");
+}
+
+#[test]
+fn docs_rolls_up_a_long_listing_into_folders() {
+    let fixture = Fixture::new("docs-rollup");
+    for at in 0..31 {
+        fixture.write(
+            &format!("docs/guides/page{at}.md"),
+            "# Page\n\nSome words go here.\n",
+        );
+    }
+    assert!(fixture.drift(&["index", "."]).status.success());
+    let listed = stdout(&fixture.drift(&["docs"]));
+    assert!(listed.starts_with("31 documents in 1 folder"), "{listed}");
+    assert!(listed.contains("docs/guides  31 documents"), "{listed}");
+    assert!(!listed.contains("page0"), "{listed}");
+    assert!(stdout(&fixture.drift(&["docs", "--all"])).contains("page0"));
+}
+
+#[test]
+fn show_prints_a_line_range_of_any_file() {
+    let fixture = docs_fixture("show-range");
+    let shown = stdout(&fixture.drift(&["show", "setup.md:3-99"]));
+    assert_eq!(shown, "docs/setup.md:3-3\nInstall the tool and run it.\n");
+    let past_the_end = fixture.drift(&["show", "setup.md:50-60"]);
+    assert!(!past_the_end.status.success());
+}
+
+#[test]
+fn plain_text_only_counts_where_documents_live() {
+    let fixture = Fixture::new("text-docs");
+    let prose = "This note explains how the rollout worked in some detail.\n";
+    fixture.write("notes/rollout.txt", prose);
+    fixture.write("docs/words.txt", "alpha\nbeta\ngamma\n");
+    fixture.write("tests/data/input.txt", prose);
+    fixture.write("requirements.txt", "flask\nblack\n");
+    assert!(fixture.drift(&["index", "."]).status.success());
+    let index = fixture.index_json();
+    let files = index["files"].as_object().unwrap();
+    assert!(files.contains_key("notes/rollout.txt"));
+    assert!(files.contains_key("docs/words.txt"));
+    assert!(!files.contains_key("tests/data/input.txt"));
+    assert!(!files.contains_key("requirements.txt"));
+
+    let found = stdout(&fixture.drift(&["docs", "rollout"]));
+    assert!(found.starts_with("notes/rollout.txt:1-1"), "{found}");
+    // A list isn't a document, but it still has to count as indexed or the index never settles.
+    let before = fixture.index_json()["generated_at"].clone();
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    assert!(fixture.drift(&["docs", "rollout"]).status.success());
+    assert_eq!(fixture.index_json()["generated_at"], before);
+    assert!(!stdout(&fixture.drift(&["docs"])).contains("words.txt"));
+}
+
+#[test]
+fn sections_of_plain_documents_are_not_symbols() {
+    let fixture = Fixture::new("sections-hidden");
+    fixture.write("notes.md", "Rollout notes without any headings in them.\n");
+    assert!(fixture.drift(&["index", "."]).status.success());
+    assert!(stdout(&fixture.drift(&["outline", "notes.md"])).contains("section Rollout notes"));
+    assert!(!fixture.drift(&["query", "Rollout"]).status.success());
+    assert!(!fixture.drift(&["find", "rollout"]).status.success());
+    assert!(
+        fixture.index_json()["symbol_index"]
+            .as_object()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn outlines_read_rst_and_asciidoc() {
+    let fixture = Fixture::new("doc-formats");
+    fixture.write(
+        "guide.rst",
+        "Guide\n=====\n\nIntro words.\n\nInstall\n-------\n\nSteps.\n",
+    );
+    fixture.write("guide.adoc", "= Manual\n\n== Usage\n\nWords.\n");
+    assert!(fixture.drift(&["index", "."]).status.success());
+    let rst = stdout(&fixture.drift(&["outline", "guide.rst"]));
+    assert!(rst.contains("rst, "), "{rst}");
+    assert!(rst.contains("heading Install  6-9 in Guide"), "{rst}");
+    let adoc = stdout(&fixture.drift(&["outline", "guide.adoc"]));
+    assert!(adoc.contains("heading Usage  3-5 in Manual"), "{adoc}");
+    assert!(stdout(&fixture.drift(&["show", "guide.rst:Install"])).contains("Steps."));
 }

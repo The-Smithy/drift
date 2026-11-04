@@ -1,6 +1,6 @@
 ---
 name: drift
-description: Find where code is defined, read one function, see a file's contents, and trace uses and imports with far fewer tokens than grepping or reading whole files. Use before searching or exploring code.
+description: Find code and docs with far fewer tokens than grepping or reading whole files: definitions, one function, a file's contents, uses, imports, and the right section of a document. Use before searching or exploring.
 paths:
   - "**/*.ts"
   - "**/*.tsx"
@@ -14,6 +14,8 @@ paths:
   - "**/*.rs"
   - "**/*.sql"
   - "**/*.md"
+  - "**/*.mdx"
+  - "**/*.rst"
   - "**/*.lua"
   - "**/*.gd"
   - "**/*.cs"
@@ -38,6 +40,7 @@ Run these before grepping or reading whole files. The index builds and refreshes
 | Read one definition | `drift show <symbol>` (or `path:name`, `path:line`, `Parent.name`) |
 | See how to call it | `drift sig <symbol>` |
 | See what a file or long doc contains | `drift outline <file>` |
+| Search docs (no words lists them) | `drift docs <words>`, then `drift show <path:start-end>` |
 | Find uses | `drift refs <symbol>` |
 | Find importers | `drift importers <file>` |
 | Find tests | `drift tests <text>` or `drift tests --for <file>` |
@@ -47,6 +50,6 @@ Run these before grepping or reading whole files. The index builds and refreshes
 
 Output is capped. Narrow it with `--in <path>`, or use `--limit <n>` or `--all`.
 
-Never read `.drift-index.json`. It's large, and with `--compact` it's one line.
+Never read `.drift-index.json`. It's large.
 
-Grep is still right for strings and comments. `drift refs` matches by name, so its hits can include other things with the same name.
+`drift docs` matches words, not meanings, so try others if it misses. Grep is still right for strings and comments. `drift refs` matches by name, so its hits can include other things with the same name.

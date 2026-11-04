@@ -72,7 +72,7 @@ The real test is whether direct file search falls on real work, which `drift aud
 | **`drift map`** | A budgeted summary of a repo: main folders, entry points, and the most imported files and symbols. Replaces exploring with `ls` and opening files at the start of a session. | 400K–800K |
 | **`drift changes [ref]`** | Lists the symbols changed since a git ref, mapped from diff lines to their enclosing definitions. Lets an agent review a branch without reading whole files. | 300K–600K |
 
-## Phase 5: Coverage (about 300K–600K tokens left)
+## Phase 5: Coverage (about 450K–900K tokens left)
 
 Ordered by what agents actually read, rather than by which languages are popular. Each still has to pass the benchmark.
 
@@ -82,9 +82,11 @@ Ordered by what agents actually read, rather than by which languages are popular
 | **GDScript** (built) | 7% of `Read` output, more than Rust and JavaScript combined in this sample. | 200K–400K |
 | **Lua** (built) | 2% of `Read` output, in repos with thousands of Lua files. | 200K–400K |
 | **C, C++ and C#** (built) | Large languages with long files, and Unreal projects. These grammars are the main reason the binary grew from about 9 MB to about 19 MB. | 750K–1.5M |
+| **Document search** (built) | About 14% of file reading and searching went to documents, and only 15% of those calls read a whole file, so finding the right part costs more than reading it. `drift docs` ranks sections by keyword and returns pointers. On 50 questions written in advance across three doc sets, the right document was in the results for 48, and first for 35. 10 of those questions were on a set we didn't tune against: 9 found, 5 first. | 300K–600K |
 | **PHP** | The largest uncovered language by file count, though much of that may be vendored code. | 200K–400K |
 | **JSON and YAML keys** (built) | 4% of `Read` output is JSON. An outline of keys avoids reading large config files. | 150K–300K |
 | **Rust package names** | `drift importers` guesses crate names from folder names, so a renamed package gets a wrong "no importers" answer. Read them from `Cargo.toml`. | 100K–200K |
+| **Looking up one dependency** | About 3% of file reading and searching was in vendored code, so this can wait. Models know popular libraries, but not new major versions, private packages or exact signatures. Index one named package on request, once per version, and keep it out of normal results. Indexing all of them would flood results and slow every lookup. | 150K–300K |
 
 ## Phase 6: Adoption (built)
 
@@ -106,7 +108,7 @@ These were considered and rejected, or don't earn their cost yet. New evidence c
 
 | Idea | Why not |
 |------|---------|
-| **Embeddings or semantic search** | Adds a model, large dependencies and slow indexing. Try `drift find` first and measure what it misses. |
+| **Embeddings or semantic search** | Adds a model, large dependencies and slow indexing. Try `drift find` and `drift docs` first and measure what they miss. So far that's synonyms, which an agent can often get past by trying other words. |
 | **MCP server** | Tool definitions can cost tokens in every session, whether they're used or not. A shell command costs nothing until it runs. |
 | **Language server integration** | More accurate, but needs per-language servers and setup, which breaks the single-binary promise. |
 | **Incremental indexing** | A full rebuild took at most 0.32s, so there's little to gain. |

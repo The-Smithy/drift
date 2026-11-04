@@ -212,6 +212,7 @@ fn exact_matches<'a>(index: &'a Index, selector: &str, view: &View) -> Vec<Locat
     };
     symbols_where(index, view, |path, symbol| {
         symbol.name == name
+            && symbol.kind != "section"
             && parent.is_none_or(|parent| symbol.parent.as_deref() == Some(parent))
             && wanted_file
                 .as_ref()
@@ -271,6 +272,7 @@ fn suggestions(index: &Index, name: &str) -> Vec<String> {
         .files
         .values()
         .flat_map(|file| &file.symbols)
+        .filter(|symbol| symbol.kind != "section")
         .map(|symbol| symbol.name.as_str())
         .collect();
     let mut close: Vec<(usize, &str)> = names
@@ -315,7 +317,7 @@ pub fn query(index: &Index, names: &[String], view: &View) -> Answer {
         if matches.is_empty() {
             let lowered = name.to_lowercase();
             matches = symbols_where(index, view, |_, symbol| {
-                symbol.name.to_lowercase().contains(&lowered)
+                symbol.kind != "section" && symbol.name.to_lowercase().contains(&lowered)
             });
         }
         if grouped {
@@ -575,11 +577,41 @@ pub fn importers(index: &Index, module: &str, view: &View) -> Answer {
     Answer::found(lines)
 }
 
+// `path:start-end`, the form `drift docs` points at.
+fn show_lines(index: &Index, selector: &str) -> Option<Answer> {
+    let (file, lines) = selector.rsplit_once(':')?;
+    let (start, end) = lines.split_once('-')?;
+    let start: usize = start.parse().ok().filter(|start| *start > 0)?;
+    let end: usize = end.parse().ok().filter(|end| *end >= start)?;
+    let path = match single_file(index, file) {
+        Ok(path) => path,
+        Err(answer) => return Some(answer),
+    };
+    let Some(source) = read_source(Path::new(&index.root), path) else {
+        return Some(Answer::missing(format!("Can't read {path}")));
+    };
+    let wanted: Vec<String> = source
+        .lines()
+        .skip(start - 1)
+        .take(end - start + 1)
+        .map(str::to_string)
+        .collect();
+    if wanted.is_empty() {
+        return Some(Answer::missing(format!("{path} has no line {start}")));
+    }
+    let mut output = vec![format!("{path}:{start}-{}", start + wanted.len() - 1)];
+    output.extend(wanted);
+    Some(Answer::found(output))
+}
+
 pub fn show(index: &Index, selector: &str, view: &View) -> Answer {
     let mut matches = exact_matches(index, selector, view);
     // A definition is what's wanted, not its one-line declaration in a header.
     matches.sort_by_key(|(_, symbol)| symbol.end_line.unwrap_or(symbol.line) == symbol.line);
     let Some(((path, symbol), others)) = matches.split_first() else {
+        if let Some(answer) = show_lines(index, selector) {
+            return answer;
+        }
         let name = selector.rsplit([':', '.']).next().unwrap_or(selector);
         return Answer::missing(miss_message(index, name));
     };
@@ -646,7 +678,7 @@ pub fn sig(index: &Index, names: &[String], view: &View) -> Answer {
     Answer { lines, found }
 }
 
-fn name_words(name: &str) -> Vec<String> {
+pub fn name_words(name: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut current = String::new();
     let mut previous_lower = false;
@@ -679,7 +711,7 @@ pub fn find(index: &Index, query: &[String], view: &View) -> Answer {
     let mut scored: Vec<(u32, &str, &Symbol)> = Vec::new();
     for (path, file) in index.files.iter().filter(|(path, _)| view.includes(path)) {
         let lowered_path = path.to_lowercase();
-        for symbol in &file.symbols {
+        for symbol in file.symbols.iter().filter(|s| s.kind != "section") {
             let words = name_words(&symbol.name);
             let doc = symbol.doc.as_deref().unwrap_or("").to_lowercase();
             let mut score = 0;

@@ -102,7 +102,8 @@ pub fn index_repo(root: &Path, extra_dirs: &[String], extra_files: &[String]) ->
 
     let mut symbol_index: BTreeMap<String, Vec<SymbolLocation>> = BTreeMap::new();
     for (path, file) in &files {
-        for symbol in &file.symbols {
+        // A section's name is just its first line, so nobody looks one up by name.
+        for symbol in file.symbols.iter().filter(|s| s.kind != "section") {
             symbol_index
                 .entry(symbol.name.clone())
                 .or_default()
@@ -298,6 +299,7 @@ fn walk(root: &Path, extra_dirs: &[String], extra_files: &[String]) -> Vec<PathB
         .collect();
 
     // Not WalkBuilder::max_filesize: setting it makes the walker skip filter_entry for files.
+    let root_for_filter = root.to_path_buf();
     let walker = WalkBuilder::new(root)
         .hidden(false)
         .parents(false)
@@ -320,6 +322,15 @@ fn walk(root: &Path, extra_dirs: &[String], extra_files: &[String]) -> Vec<PathB
         .filter(|entry| entry.file_type().is_some_and(|t| t.is_file()))
         .filter(|entry| {
             lowercase_extension(entry.path()).is_some_and(|e| extract::is_supported(&e))
+        })
+        .filter(|entry| {
+            lowercase_extension(entry.path()).as_deref() != Some("txt")
+                || entry
+                    .path()
+                    .strip_prefix(&root_for_filter)
+                    .is_ok_and(|relative| {
+                        extract::is_wanted_text(&relative.to_string_lossy().replace('\\', "/"))
+                    })
         })
         .filter(|entry| entry.metadata().is_ok_and(|m| m.len() <= MAX_FILE_SIZE))
         .map(|entry| entry.into_path())
