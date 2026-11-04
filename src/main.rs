@@ -4,6 +4,7 @@ mod audit;
 mod bench;
 mod docs;
 mod extract;
+mod hook;
 mod imports;
 mod index;
 mod install;
@@ -419,7 +420,7 @@ fn run(command: Command) -> Result<()> {
         } => cmd_install(&path, hook, instructions, file.as_deref(), &agent),
         Command::UpdateCheck => update::check_now(),
         Command::Hook => {
-            install::hook();
+            hook::run();
             Ok(())
         }
         Command::UpdateRefresh => {

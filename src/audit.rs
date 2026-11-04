@@ -172,9 +172,18 @@ const BUILDERS: &[&str] = &[
 
 /// Splits a shell command at `&&`, `||`, `;`, `|` and newlines, outside quotes.
 fn segments(command: &str) -> Vec<&str> {
+    pipeline_segments(command)
+        .into_iter()
+        .map(|(segment, _)| segment)
+        .collect()
+}
+
+/// The same parts, each with whether a pipe feeds it.
+pub(crate) fn pipeline_segments(command: &str) -> Vec<(&str, bool)> {
     let mut parts = Vec::new();
     let mut quote = None;
     let mut start = 0;
+    let mut piped = false;
     let mut chars = command.char_indices().peekable();
     while let Some((at, ch)) = chars.next() {
         match (quote, ch) {
@@ -182,21 +191,24 @@ fn segments(command: &str) -> Vec<&str> {
             (Some(_), _) => {}
             (None, '\'' | '"') => quote = Some(ch),
             (None, ';' | '\n') => {
-                parts.push(&command[start..at]);
+                parts.push((&command[start..at], piped));
                 start = at + ch.len_utf8();
+                piped = false;
             }
             (None, '&' | '|') => {
-                parts.push(&command[start..at]);
+                parts.push((&command[start..at], piped));
                 start = at + 1;
-                if chars.peek().is_some_and(|(_, next)| *next == ch) {
+                let doubled = chars.peek().is_some_and(|(_, next)| *next == ch);
+                if doubled {
                     chars.next();
                     start = at + 2;
                 }
+                piped = ch == '|' && !doubled;
             }
             _ => {}
         }
     }
-    parts.push(&command[start..]);
+    parts.push((&command[start..], piped));
     parts
 }
 
@@ -204,7 +216,7 @@ fn unquote(word: &str) -> &str {
     word.trim_matches(|c| c == '"' || c == '\'')
 }
 
-fn program_name(word: &str) -> String {
+pub(crate) fn program_name(word: &str) -> String {
     let word = unquote(word);
     let base = word.rsplit(['/', '\\']).next().unwrap_or(word);
     let lower = base.to_ascii_lowercase();

@@ -84,7 +84,8 @@ cargo test
 | `src/imports.rs` | Resolving an import to a file |
 | `src/docs.rs` | Searching and listing documents |
 | `src/bench.rs` | The standard benchmark |
-| `src/install.rs` | `install` and the Claude Code hook |
+| `src/install.rs` | `install`, including adding the Claude Code hook |
+| `src/hook.rs` | What the hook notices and the notes it gives |
 | `src/model.rs` | The index format |
 | `src/allocator.rs` | mimalloc, for the musl build only |
 | `src/extract/` | One extractor per language |

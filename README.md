@@ -328,7 +328,7 @@ This table comes from each tool's documentation. We haven't run Drift inside eve
 
 If you only want the skill and not the always-loaded section, leave out `--instructions`. To put the section in a different file, such as one that another tool regenerates around, use `--instructions --file SITE.md`.
 
-Claude Code users can also add `--hook`, for a note when an agent greps for a name the index knows or reads a large file. Hooks are specific to Claude Code.
+Instructions are easy for an agent to skip once it's busy, so Claude Code users can also add `--hook`. Just before a search or a large read, it adds a one-line note naming the Drift command that answers it, such as where a name is defined. Each note appears once a session, and it never blocks a tool. See [AGENTS.md](AGENTS.md#claude-code) for what it catches. Hooks are specific to Claude Code.
 
 ### Other AI tools
 
