@@ -302,7 +302,19 @@ Kiro, Junie, Continue and Aider get their own files when the repo already uses t
 drift install . --hook
 ```
 
-`--hook` adds a Claude Code hook to `.claude/settings.json`. When an agent searches for a name the index knows, or reads a whole file over 8 KB, the hook adds a short note pointing to Drift. It never blocks a tool, and if anything goes wrong it stays silent. It needs `drift` on the `PATH`.
+`--hook` adds a Claude Code hook to `.claude/settings.json`. Just before a search or read, it can add a short note:
+
+| What the agent does | What the note says |
+|---------------------|--------------------|
+| Searches for a name the index defines, in any part of a chained command or among several terms | Where it's defined, and the `drift show` and `drift refs` commands |
+| Searches for part of a name, such as `formField` | The `drift find` command |
+| Searches documents across a folder or with a glob such as `*.md` | The `drift docs` command |
+| Reads or `cat`s a whole file over 8 KB | The `drift outline` command |
+| Runs any other search | On the first, and every 25th after that, a reminder of what Drift can do |
+
+Each note appears once a session, so repeating a search costs nothing extra. Searches inside a pipe, like `cargo test | grep failed`, are ignored, and so are searches of one named document or of `node_modules`. Lowercase words count as names only when searched alone and case-sensitively.
+
+It never blocks a tool, and if anything goes wrong it stays silent. It needs `drift` on the `PATH`, and it stays quiet in a folder with no index, such as a new git worktree, until a lookup builds one.
 
 ### Anything else
 

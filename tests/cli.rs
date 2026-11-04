@@ -869,6 +869,169 @@ fn hook_adds_notes_without_blocking_and_fails_open() {
     assert_eq!(ranged, "");
 }
 
+fn hook_note(fixture: &Fixture, tool: &str, input: Value) -> String {
+    let cwd = fixture.root.to_string_lossy().into_owned();
+    let note = run_hook(
+        fixture,
+        serde_json::json!({ "tool_name": tool, "cwd": cwd, "tool_input": input }),
+    );
+    if note.is_empty() {
+        return note;
+    }
+    let parsed: Value = serde_json::from_str(&note).unwrap();
+    parsed["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn hook_understands_chained_commands_and_several_terms() {
+    let fixture = feature_fixture("hook-chains");
+    assert!(fixture.drift(&["index", ".", "--compact"]).status.success());
+
+    let chained = hook_note(
+        &fixture,
+        "Bash",
+        serde_json::json!({ "command": "git status; echo ---; grep -n 'verifyToken' -A5 src/auth.ts | head" }),
+    );
+    assert!(
+        chained.contains("verifyToken is defined at src/auth.ts:2"),
+        "{chained}"
+    );
+
+    let terms = hook_note(
+        &fixture,
+        "Grep",
+        serde_json::json!({ "pattern": "verifyToken\\(|somethingElse" }),
+    );
+    assert!(terms.contains("verifyToken is defined at"), "{terms}");
+
+    let shell = hook_note(
+        &fixture,
+        "PowerShell",
+        serde_json::json!({ "command": "Select-String -Path src\\auth.ts -Pattern verifyToken" }),
+    );
+    assert!(shell.contains("verifyToken is defined at"), "{shell}");
+
+    let part = hook_note(
+        &fixture,
+        "Grep",
+        serde_json::json!({ "pattern": "verifyTok" }),
+    );
+    assert!(part.contains("drift find verifyTok"), "{part}");
+
+    for quiet in [
+        serde_json::json!({ "command": "cargo test | grep verifyToken" }),
+        serde_json::json!({ "command": "grep -n 'Netlify|Vercel' src/auth.ts" }),
+        serde_json::json!({ "command": "grep -n verifyToken README.md" }),
+    ] {
+        assert_eq!(hook_note(&fixture, "Bash", quiet), "");
+    }
+}
+
+#[test]
+fn hook_points_doc_searches_to_drift_docs() {
+    let fixture = feature_fixture("hook-docs");
+    fixture.write(
+        "docs/billing.md",
+        "# Billing\n\nA refund goes back to the card.\n",
+    );
+    assert!(fixture.drift(&["index", ".", "--compact"]).status.success());
+
+    let folder = hook_note(
+        &fixture,
+        "Bash",
+        serde_json::json!({ "command": "grep -rn 'refund|chargeback' docs/" }),
+    );
+    assert!(folder.contains("drift docs refund chargeback"), "{folder}");
+
+    let glob = hook_note(
+        &fixture,
+        "Grep",
+        serde_json::json!({ "pattern": "refund", "glob": "**/*.md" }),
+    );
+    assert!(glob.contains("drift docs refund"), "{glob}");
+
+    let one_file = hook_note(
+        &fixture,
+        "Bash",
+        serde_json::json!({ "command": "grep -n refund docs/billing.md" }),
+    );
+    assert_eq!(one_file, "");
+}
+
+#[test]
+fn hook_finds_the_index_from_where_the_command_or_file_is() {
+    let fixture = feature_fixture("hook-parent");
+    assert!(fixture.drift(&["index", ".", "--compact"]).status.success());
+    let parent = fixture
+        .root
+        .parent()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let root = fixture.root.to_string_lossy().into_owned();
+
+    let moved = run_hook(
+        &fixture,
+        serde_json::json!({ "tool_name": "Bash", "cwd": parent, "tool_input": { "command": format!("cd \"{root}\" && grep -n verifyToken src/auth.ts") } }),
+    );
+    assert!(moved.contains("verifyToken is defined at"), "{moved}");
+
+    let padding = "x".repeat(10_000);
+    fixture.write("src/big.ts", &format!("export const big = '{padding}';\n"));
+    assert!(fixture.drift(&["index", ".", "--compact"]).status.success());
+    let big = fixture
+        .root
+        .join("src/big.ts")
+        .to_string_lossy()
+        .into_owned();
+    let read = run_hook(
+        &fixture,
+        serde_json::json!({ "tool_name": "Read", "cwd": parent, "tool_input": { "file_path": big } }),
+    );
+    assert!(read.contains("drift outline src/big.ts"), "{read}");
+}
+
+#[test]
+fn hook_gives_each_note_once_a_session() {
+    let fixture = feature_fixture("hook-once");
+    assert!(fixture.drift(&["index", ".", "--compact"]).status.success());
+    let cwd = fixture.root.to_string_lossy().into_owned();
+    let session = format!("drift-cli-test-{}", std::process::id());
+    let event = serde_json::json!({
+        "tool_name": "Grep",
+        "cwd": cwd,
+        "session_id": session,
+        "tool_input": { "pattern": "verifyToken" },
+    });
+    assert!(run_hook(&fixture, event.clone()).contains("verifyToken"));
+    assert_eq!(run_hook(&fixture, event), "");
+    let _ = std::fs::remove_file(std::env::temp_dir().join("drift-hook").join(session));
+}
+
+#[test]
+fn hook_reminds_an_agent_that_keeps_searching_for_text() {
+    let fixture = feature_fixture("hook-reminder");
+    assert!(fixture.drift(&["index", ".", "--compact"]).status.success());
+    let cwd = fixture.root.to_string_lossy().into_owned();
+    let session = format!("drift-cli-reminder-{}", std::process::id());
+    let event = serde_json::json!({
+        "tool_name": "Bash",
+        "cwd": cwd,
+        "session_id": session,
+        "tool_input": { "command": "grep -rn 'some text' src" },
+    });
+    let first = run_hook(&fixture, event.clone());
+    assert!(first.contains("this repo is indexed"), "{first}");
+    for _ in 1..25 {
+        assert_eq!(run_hook(&fixture, event.clone()), "");
+    }
+    assert!(run_hook(&fixture, event).contains("this repo is indexed"));
+    let _ = std::fs::remove_file(std::env::temp_dir().join("drift-hook").join(session));
+}
+
 #[test]
 fn hook_install_merges_settings_and_is_idempotent() {
     let fixture = Fixture::new("hook-install");
@@ -882,13 +1045,13 @@ fn hook_install_merges_settings_and_is_idempotent() {
     let settings = read_json(&fixture.root.join(".claude/settings.json"));
     assert_eq!(settings["theme"], "dark");
     let entries = settings["hooks"]["PreToolUse"].as_array().unwrap();
-    assert_eq!(entries.len(), 4);
+    assert_eq!(entries.len(), 5);
     assert_eq!(entries[0]["matcher"], "Edit");
     let matchers: Vec<&str> = entries[1..]
         .iter()
         .map(|entry| entry["matcher"].as_str().unwrap())
         .collect();
-    assert_eq!(matchers, ["Bash", "Grep", "Read"]);
+    assert_eq!(matchers, ["Bash", "PowerShell", "Grep", "Read"]);
 
     let broken = Fixture::new("hook-broken");
     broken.write(".claude/settings.json", "{ not json");

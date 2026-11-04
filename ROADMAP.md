@@ -100,7 +100,11 @@ A feature saves nothing if agents don't use it.
 | **Smaller instructions** | Instructions cost tokens in every session. Freshness and ranking will let us shorten them, with a limit enforced in CI. | 50K–100K |
 | **Update notices** | Old versions miss new lookups, so a lookup prints one line when a newer release exists. See the [README](README.md#update-notices). | 150K–300K |
 
-**Next question:** does telling agents to use Drift work? The first `drift audit` found Drift in a tiny share of calls that it could have answered, though most of that history predates the instructions. Re-run it once the instructions have been in place for a while. If the share stays low, the hook should become the default, because instructions alone aren't enough.
+**Does telling agents to use Drift work?** Not on its own. In one busy session with the instructions in its context the whole time, an agent ran 31 Drift lookups and about 207 greps. Some of those were rightly looking for text, but it also made 150 file reads. The first version of the hook wouldn't have helped much. Replayed over that session's 358 searches and reads, it gave 16 notes, and none on the 168 greps run through the shell, because agents chain commands and search several terms at once.
+
+The hook now handles those. Replaying three sessions from each of three projects took it from 58 notes to 225, at 1K–6K tokens of notes per project. See the [hook's notes](AGENTS.md#claude-code).
+
+**Next question:** do the notes change what agents do? A replay can't show that. Compare `drift audit` in repos with the hook after a few weeks. If Drift's share rises, the hook should become the default.
 
 ## Decided against
 
